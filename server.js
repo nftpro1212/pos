@@ -20,6 +20,7 @@ import settingsRoutes from "./routes/settingsRoutes.js";
 import uploadRoutes from "./routes/uploadRoutes.js";
 import shiftRoutes from "./routes/shiftRoutes.js";
 import tipRoutes from "./routes/tipRoutes.js";
+import agentRoutes from "./routes/agentRoutes.js";
 import path from "path";
 import { initSocket } from "./socket.js";
 
@@ -72,6 +73,7 @@ app.use("/api/settings", settingsRoutes);
 app.use("/api/upload", uploadRoutes);
 app.use("/api/shifts", shiftRoutes);
 app.use("/api/tips", tipRoutes);
+app.use("/api/agent", agentRoutes);
 app.use("/api/uploads", express.static(path.resolve("uploads")));
 
 // Simple index

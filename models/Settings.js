@@ -40,6 +40,12 @@ const printerDeviceSchema = new Schema(
       enum: ["network", "usb", "bluetooth"],
       default: "network",
     },
+    dispatchMode: {
+      type: String,
+      enum: ["direct", "agent"],
+      default: "direct",
+    },
+    agentChannel: { type: String, trim: true, default: "" },
     ipAddress: { type: String, trim: true, default: "" },
     port: { type: Number, default: 9100 },
     paperWidth: { type: String, enum: ["58mm", "80mm"], default: "80mm" },
@@ -81,6 +87,11 @@ const printerSettingsSchema = new Schema(
       default: "network",
       enum: ["network", "usb", "bluetooth"],
     },
+    dispatchMode: {
+      type: String,
+      enum: ["direct", "agent"],
+      default: "direct",
+    },
     printerName: { type: String, default: "Default Printer" },
     ipAddress: { type: String, default: "192.168.1.100" },
     port: { type: Number, default: 9100 },
@@ -109,6 +120,7 @@ const printerSettingsSchema = new Schema(
       default: "disconnected",
       enum: ["connected", "disconnected", "testing"],
     },
+    agentChannel: { type: String, default: "default" },
     printers: { type: [printerDeviceSchema], default: [] },
     defaultPrinterId: { type: Schema.Types.ObjectId, default: null },
     receiptTemplate: {
