@@ -47,7 +47,15 @@ const buildRestaurantInfo = (settings = {}) => ({
   taxRate: settings.taxSettings?.taxRate || 0,
 });
 
-const triggerAutomaticPrints = async ({ settings, order, payment }) => {
+const triggerAutomaticPrints = async (
+  { settings, order, payment },
+  {
+    targetPrinterIds = [],
+    includeNonAuto = false,
+    overrideDispatchMode,
+    overrideAgentChannel,
+  } = {},
+) => {
   if (!settings?.printerSettings?.enabled) {
     return {
       results: [],
@@ -60,36 +68,67 @@ const triggerAutomaticPrints = async ({ settings, order, payment }) => {
     ? basePrinterSettings.printers
     : [];
 
-  const autoPrinters = printers.filter((printer) => {
+  const normalizedTargetIds = Array.isArray(targetPrinterIds)
+    ? targetPrinterIds.filter(Boolean).map(String)
+    : [];
+
+  const fallbackPrinter = basePrinterSettings.ipAddress
+    ? {
+        _id: null,
+        name: basePrinterSettings.printerName || "Asosiy printer",
+        connectionType: basePrinterSettings.connectionType || "network",
+        ipAddress: basePrinterSettings.ipAddress,
+        port: Number(basePrinterSettings.port || 9100),
+        paperWidth: basePrinterSettings.paperWidth || "80mm",
+        printerType: basePrinterSettings.printerType || "thermal",
+        autoprint: Boolean(basePrinterSettings.autoprint),
+        enabled: true,
+        autoPrintTriggers: ["payment"],
+        headerText: basePrinterSettings.headerText,
+        footerText: basePrinterSettings.footerText,
+        copies: basePrinterSettings.printCopies || 1,
+        templateOverrides: basePrinterSettings.templateOverrides || {},
+        dispatchMode: resolveDispatchMode(basePrinterSettings.dispatchMode, "direct"),
+        agentChannel: resolveAgentChannel(basePrinterSettings.agentChannel, "default"),
+      }
+    : null;
+
+  const networkCapable = (printer) => {
+    if (!printer) return false;
     if (printer.connectionType && printer.connectionType !== "network") {
       return false;
     }
     if (!printer.ipAddress || !printer.port) return false;
-    return shouldAutoprintForPayment(printer);
+    return true;
+  };
+
+  let selectedPrinters = printers.filter((printer) => {
+    if (!networkCapable(printer)) return false;
+    if (normalizedTargetIds.length && !normalizedTargetIds.includes(String(printer._id))) {
+      return false;
+    }
+    if (!includeNonAuto) {
+      return shouldAutoprintForPayment(printer);
+    }
+    return printer.enabled !== false;
   });
 
-  if (!autoPrinters.length && basePrinterSettings.autoprint && basePrinterSettings.ipAddress) {
-    autoPrinters.push({
-      _id: null,
-      name: basePrinterSettings.printerName || "Asosiy printer",
-      connectionType: basePrinterSettings.connectionType || "network",
-      ipAddress: basePrinterSettings.ipAddress,
-      port: Number(basePrinterSettings.port || 9100),
-      paperWidth: basePrinterSettings.paperWidth || "80mm",
-      printerType: basePrinterSettings.printerType || "thermal",
-      autoprint: true,
-      enabled: true,
-      autoPrintTriggers: ["payment"],
-      headerText: basePrinterSettings.headerText,
-      footerText: basePrinterSettings.footerText,
-      copies: basePrinterSettings.printCopies || 1,
-      templateOverrides: basePrinterSettings.templateOverrides || {},
-      dispatchMode: resolveDispatchMode(basePrinterSettings.dispatchMode, "direct"),
-      agentChannel: resolveAgentChannel(basePrinterSettings.agentChannel, "default"),
-    });
+  if (!selectedPrinters.length) {
+    if (!includeNonAuto) {
+      const eligible = printers.filter((printer) => networkCapable(printer) && shouldAutoprintForPayment(printer));
+      selectedPrinters = eligible;
+    }
   }
 
-  if (!autoPrinters.length) {
+  if (!selectedPrinters.length) {
+    if (includeNonAuto && fallbackPrinter) {
+      selectedPrinters = [fallbackPrinter];
+    } else if (!includeNonAuto && fallbackPrinter?.autoprint) {
+      selectedPrinters = [fallbackPrinter];
+    }
+  }
+
+  if (!selectedPrinters.length) {
     return {
       results: [],
       summary: { total: 0, success: 0, failed: 0 },
@@ -105,13 +144,13 @@ const triggerAutomaticPrints = async ({ settings, order, payment }) => {
   );
 
   const results = await Promise.all(
-    autoPrinters.map(async (printer) => {
+    selectedPrinters.map(async (printer) => {
       const dispatchMode = resolveDispatchMode(
-        printer.dispatchMode,
+        overrideDispatchMode ?? printer.dispatchMode,
         resolveDispatchMode(basePrinterSettings.dispatchMode, "direct"),
       );
       const agentChannel = resolveAgentChannel(
-        printer.agentChannel,
+        overrideAgentChannel ?? printer.agentChannel,
         resolveAgentChannel(basePrinterSettings.agentChannel, "default"),
       );
 
@@ -323,6 +362,72 @@ export const createPayment = async (req, res) => {
   } catch (error) {
     console.error("[PAYMENT] create error", error);
     res.status(500).json({ message: error.message || "To'lovni bajarib bo'lmadi" });
+  }
+};
+
+export const printPaymentReceipt = async (req, res) => {
+  try {
+    const { paymentId } = req.params;
+    const {
+      printerId,
+      printerIds,
+      dispatchMode: overrideDispatchMode,
+      agentChannel: overrideAgentChannel,
+    } = req.body || {};
+
+    const payment = await Payment.findById(paymentId)
+      .populate({ path: "order", select: "table tableName restaurantId total items" })
+      .populate({ path: "customer", select: "name phone" });
+
+    if (!payment) {
+      return res.status(404).json({ message: "To'lov topilmadi" });
+    }
+
+    let orderDoc = payment.order || null;
+    if (!orderDoc) {
+      orderDoc = await Order.findById(payment.order);
+    }
+    if (orderDoc && typeof orderDoc.toObject !== "function") {
+      const lookupId = orderDoc?._id || orderDoc;
+      orderDoc = await Order.findById(lookupId);
+    }
+    if (!orderDoc) {
+      return res.status(404).json({ message: "Buyurtma topilmadi" });
+    }
+
+    const settings = await Settings.findOne();
+    if (!settings?.printerSettings?.enabled) {
+      return res.status(400).json({ message: "Printer sozlamalari faol emas" });
+    }
+
+    const targets = [];
+    if (printerId) targets.push(String(printerId));
+    if (Array.isArray(printerIds)) {
+      printerIds.filter(Boolean).forEach((id) => targets.push(String(id)));
+    }
+
+    const printReport = await triggerAutomaticPrints(
+      { settings, order: orderDoc, payment },
+      {
+        includeNonAuto: true,
+        targetPrinterIds: targets.length ? targets : undefined,
+        overrideDispatchMode,
+        overrideAgentChannel,
+      },
+    );
+
+    const summary = printReport?.summary || { total: 0, success: 0, failed: 0 };
+    const success = (summary.success || 0) > 0;
+    const message = success
+      ? summary.failed
+        ? `Chek ${summary.success} printerga yuborildi, ${summary.failed} xatolik`
+        : "Chek printerga yuborildi"
+      : "Chekni chop qilib bo'lmadi";
+
+    res.json({ success, message, printReport });
+  } catch (error) {
+    console.error("[PAYMENT] manual print error", error);
+    res.status(500).json({ message: error.message || "Chekni chop qilib bo'lmadi" });
   }
 };
 
