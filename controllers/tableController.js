@@ -7,8 +7,12 @@ export const listTables = async (req, res) => {
 };
 
 export const createTable = async (req, res) => {
-  const { name } = req.body;
-  const t = await Table.create({ name });
+  const { name, category } = req.body;
+  const payload = { name };
+  if (category) {
+    payload.category = category;
+  }
+  const t = await Table.create(payload);
   res.json(t);
 };
 

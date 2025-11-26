@@ -266,6 +266,64 @@ export const generateEscPosReceipt = ({
   return Buffer.from(payload, "utf8");
 };
 
+export const generatePrepTicket = ({
+  order = {},
+  items = [],
+  printer = {},
+  restaurant = {},
+  heading = "Tayyorlash",
+} = {}) => {
+  const targetItems = Array.isArray(items) ? items : [];
+  const createdAt = order.createdAt ? new Date(order.createdAt) : new Date();
+  const width = computeLineWidth(printer?.paperWidth || "80mm");
+  const divider = buildDivider({ dividerStyle: "dashed", accentSymbol: "-" }, width);
+  const commands = [ESC + "@"];
+
+  const title = printer?.headerText || restaurant?.name || "ZarPOS";
+  writeEscPosLine(commands, title, { align: "center", bold: true });
+  writeEscPosLine(commands, heading.toUpperCase(), { align: "center", bold: true });
+
+  if (order?.tableName) {
+    writeEscPosLine(commands, `Stol: ${order.tableName}`, { bold: true });
+  }
+  if (order?._id) {
+    writeEscPosLine(commands, `Buyurtma: ${String(order._id).slice(-6).toUpperCase()}`);
+  }
+
+  writeEscPosLine(commands, `Sana: ${dateFormatter.format(createdAt)}`);
+  writeEscPosLine(commands, `Vaqt: ${timeFormatter.format(createdAt)}`);
+
+  writeEscPosLine(commands, divider);
+
+  if (!targetItems.length) {
+    writeEscPosLine(commands, "Pozitsiyalar topilmadi", { align: "center" });
+  } else {
+    targetItems.forEach((item) => {
+      const qty = Number(item.qty || 0) || 0;
+      const name = safeText(item.name || "Pozitsiya");
+      writeEscPosLine(commands, `${qty} x ${name}`, { bold: true });
+      if (Array.isArray(item.modifiers) && item.modifiers.length) {
+        item.modifiers.forEach((modifier) => {
+          writeEscPosLine(commands, `  • ${modifier.name || "Modifikator"}`);
+        });
+      }
+      if (item.notes) {
+        writeEscPosLine(commands, `  (${safeText(item.notes)})`);
+      }
+      writeEscPosLine(commands, divider);
+    });
+  }
+
+  if (restaurant?.name) {
+    writeEscPosLine(commands, restaurant.name, { align: "center" });
+  }
+
+  commands.push(ESC + "d" + "\x04");
+  commands.push(GS + "V" + "\x41" + "\x03");
+
+  return Buffer.from(commands.join(""), "utf8");
+};
+
 export const buildTestReceiptData = ({ restaurant = {} } = {}) => {
   const order = {
     tableName: "TEST",

@@ -8,14 +8,51 @@ export const listMenu = async (req, res) => {
 };
 
 export const createMenu = async (req, res) => {
-  const { name, description, price, category, imageUrl } = req.body;
-  const item = await MenuItem.create({ name, description, price, category, imageUrl });
+  const {
+    name,
+    description,
+    price,
+    category,
+    imageUrl,
+    productionPrinterIds = [],
+    productionTags = [],
+  } = req.body;
+  const printerIds = Array.isArray(productionPrinterIds)
+    ? productionPrinterIds.map(String).filter(Boolean)
+    : [];
+  const tags = Array.isArray(productionTags)
+    ? productionTags.map((tag) => (typeof tag === "string" ? tag.trim() : "")).filter(Boolean)
+    : [];
+  const item = await MenuItem.create({
+    name,
+    description,
+    price,
+    category,
+    imageUrl,
+    productionPrinterIds: printerIds,
+    productionTags: tags,
+  });
   res.json(item);
 };
 
 export const updateMenu = async (req, res) => {
   const id = req.params.id;
-  const item = await MenuItem.findByIdAndUpdate(id, req.body, { new: true });
+  const payload = { ...req.body };
+  if (payload.productionPrinterIds && !Array.isArray(payload.productionPrinterIds)) {
+    payload.productionPrinterIds = [payload.productionPrinterIds].filter(Boolean);
+  }
+  if (payload.productionTags && !Array.isArray(payload.productionTags)) {
+    payload.productionTags = [payload.productionTags].filter(Boolean);
+  }
+  if (Array.isArray(payload.productionPrinterIds)) {
+    payload.productionPrinterIds = payload.productionPrinterIds.map(String).filter(Boolean);
+  }
+  if (Array.isArray(payload.productionTags)) {
+    payload.productionTags = payload.productionTags
+      .map((tag) => (typeof tag === "string" ? tag.trim() : ""))
+      .filter(Boolean);
+  }
+  const item = await MenuItem.findByIdAndUpdate(id, payload, { new: true });
   res.json(item);
 };
 

@@ -15,7 +15,9 @@ const orderItemSchema = new mongoose.Schema({
   portionKey: { type: String, trim: true, default: "standard" },
   portionLabel: { type: String, trim: true, default: "" },
   modifiers: [modifierSchema],
-  isBlocked: { type: Boolean, default: false }
+  isBlocked: { type: Boolean, default: false },
+  productionPrinterIds: { type: [String], default: [] },
+  productionTags: { type: [String], default: [] }
 });
 
 const orderSchema = new mongoose.Schema({

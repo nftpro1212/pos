@@ -10,6 +10,8 @@ const menuItemSchema = new mongoose.Schema({
   isBlocked: { type: Boolean, default: false },
   inventory: { type: Number, default: 100 }, // inventory tracking
   imageUrl: String,
+  productionPrinterIds: { type: [String], default: [] },
+  productionTags: { type: [String], default: [] },
   createdAt: { type: Date, default: Date.now }
 });
 
