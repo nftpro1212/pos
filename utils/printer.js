@@ -195,7 +195,7 @@ const createEscPosSegment = (snapshot, template, printer, { copyIndex = 0, total
     writeEscPosLine(commands, formatTwoColumn("Subtotal", `${currencyFormatter.format(snapshot.subtotal)} so'm`, width), {
       align: template.bodyAlign,
     });
-    writeEscPosLine(commands, formatTwoColumn("Soliq", `${currencyFormatter.format(snapshot.tax)} so'm`, width), {
+    writeEscPosLine(commands, formatTwoColumn("Servis", `${currencyFormatter.format(snapshot.tax)} so'm`, width), {
       align: template.bodyAlign,
     });
   }
@@ -491,7 +491,7 @@ export const generateCheckHTML = (
         ${template.showTaxBreakdown
           ? `
             <div class="meta"><span>Subtotal</span><span>${currencyFormatter.format(snapshot.subtotal)} so'm</span></div>
-            <div class="meta"><span>Soliq</span><span>${currencyFormatter.format(snapshot.tax)} so'm</span></div>
+            <div class="meta"><span>Servis</span><span>${currencyFormatter.format(snapshot.tax)} so'm</span></div>
           `
           : ""}
         ${template.showDiscount && snapshot.discount > 0

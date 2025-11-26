@@ -151,7 +151,8 @@ const settingsSchema = new mongoose.Schema({
     taxName: { type: String, default: "QQS" },
     includeInPrice: { type: Boolean, default: false }, // Narxga kiritilgan yoki alohida
     serviceCharge: { type: Number, default: 0 }, // Xizmat haq (%)
-    serviceChargeEnabled: { type: Boolean, default: false }
+    serviceChargeEnabled: { type: Boolean, default: false },
+    showOnReceipt: { type: Boolean, default: true }
   },
 
   // Soliq integratsiyasi (iiko yoki boshqa tizim)
