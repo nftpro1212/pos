@@ -59,10 +59,14 @@ app.use(morgan("dev"));
 
 connectDB();
 
-// Telegram botni ishga tushirish (agar token mavjud bo'lsa)
-const telegramBot = initTelegramBot({ app });
-if (telegramBot) {
-  app.set("telegramBot", telegramBot);
+const telegramBotMode = (process.env.TELEGRAM_BOT_MODE || "embedded").toLowerCase();
+if (telegramBotMode === "external") {
+  console.info("[Server] Telegram bot external rejimda ishlaydi. Ushbu instance botni ishga tushirmaydi.");
+} else {
+  const telegramBot = initTelegramBot({ app });
+  if (telegramBot) {
+    app.set("telegramBot", telegramBot);
+  }
 }
 
 // Routes

@@ -1,4 +1,6 @@
 import TelegramBot from "node-telegram-bot-api";
+import axios from "axios";
+import mongoose from "mongoose";
 import User from "../models/User.js";
 import {
   buildSalesReport,
@@ -8,8 +10,22 @@ import {
   formatDateTime,
 } from "./reportService.js";
 
+const dataMode = (process.env.TELEGRAM_BOT_DATA_MODE || "direct").toLowerCase();
+const usingApiData = dataMode === "api";
+const backendApiUrl = process.env.BACKEND_API_URL ? process.env.BACKEND_API_URL.replace(/\/$/, "") : "";
+const apiClient = usingApiData && backendApiUrl
+  ? axios.create({ baseURL: backendApiUrl, timeout: 20000 })
+  : null;
+
+if (usingApiData && !backendApiUrl) {
+  console.warn("[TelegramBot] BACKEND_API_URL sozlanmagan, API rejimi ishlamasligi mumkin.");
+} else if (usingApiData) {
+  console.info(`[TelegramBot] API rejimi yoqilgan. Backend URL: ${backendApiUrl}`);
+}
+
 const SESSIONS = new Map();
 const SESSION_TTL_MS = 1000 * 60 * 60 * 12; // 12 soat
+const CALLBACK_DEDUP_WINDOW_MS = 1000 * 10; // Callback so'rovlari uchun 10 soniyalik oynada dedup
 
 const presets = {
   today: { label: "Bugun", range: () => {
@@ -52,36 +68,104 @@ const validateDateToken = (value) => /\d{4}-\d{2}-\d{2}/.test(value);
 const isConflictError = (error) =>
   Boolean(error && error.code === "ETELEGRAM" && error.response?.body?.error_code === 409);
 
-const processedKeys = new Map();
-const processedQueue = [];
-const PROCESSED_LIMIT = 3000;
+const IN_MEMORY_DEDUP_TTL_MS = 1000 * 60;
+const inMemoryDedupCache = new Map();
 
-const registerProcessedKey = (key) => {
+const cleanupLocalDedup = () => {
+  if (!inMemoryDedupCache.size) {
+    return;
+  }
+  const now = Date.now();
+  for (const [key, expiresAt] of inMemoryDedupCache.entries()) {
+    if (!expiresAt || expiresAt <= now) {
+      inMemoryDedupCache.delete(key);
+    }
+  }
+};
+
+const isMongoReady = () => mongoose.connection?.readyState === 1;
+
+const processedUpdateSchema = new mongoose.Schema(
+  {
+    key: { type: String, unique: true, required: true },
+    createdAt: { type: Date, default: Date.now, expires: 60 },
+  },
+  { versionKey: false }
+);
+
+const ProcessedUpdate = mongoose.models.ProcessedUpdate ||
+  mongoose.model("ProcessedUpdate", processedUpdateSchema);
+
+let pollingConflictLogged = false;
+let pollingSuppressed = false;
+
+const logPollingConflictOnce = () => {
+  pollingSuppressed = true;
+};
+
+const registerProcessedKey = async (key) => {
   if (!key) {
     return true;
   }
-  if (processedKeys.has(key)) {
+  if (!isMongoReady()) {
+    cleanupLocalDedup();
+    const existingExpiry = inMemoryDedupCache.get(key);
+    const now = Date.now();
+    if (existingExpiry && existingExpiry > now) {
+      return false;
+    }
+    inMemoryDedupCache.set(key, now + IN_MEMORY_DEDUP_TTL_MS);
+    return true;
+  }
+  try {
+    const existing = await ProcessedUpdate.findOneAndUpdate(
+      { key },
+      { key, createdAt: new Date() },
+      { upsert: true, new: false, setDefaultsOnInsert: true }
+    );
+    return !existing;
+  } catch (error) {
+    if (error.code === 11000) {
+      return false;
+    }
+    console.warn("[TelegramBot] Processed update registratsiyasida xatolik", error.message);
     return false;
   }
-  processedKeys.set(key, Date.now());
-  processedQueue.push(key);
-  if (processedQueue.length > PROCESSED_LIMIT) {
-    const oldestKey = processedQueue.shift();
-    if (oldestKey) {
-      processedKeys.delete(oldestKey);
+};
+
+const makeCommandKey = (msg) => `cmd:${msg.chat?.id}:${msg.message_id}:${msg.date}`;
+const makeTextKey = (msg) => `txt:${msg.chat?.id}:${msg.message_id}:${msg.date}`;
+const makeCallbackKeys = (query) => {
+  const keys = [];
+  const chatId = query?.message?.chat?.id;
+  const messageId = query?.message?.message_id;
+  const data = query?.data;
+  const bucket = Math.floor(Date.now() / CALLBACK_DEDUP_WINDOW_MS);
+
+  if (chatId != null && messageId != null && data) {
+    keys.push(`cb:req:${chatId}:${messageId}:${data}:${bucket}`);
+  }
+  if (query?.id) {
+    keys.push(`cb:id:${query.id}`);
+  }
+  return keys;
+};
+
+const shouldHandleCommandMessage = (msg) => registerProcessedKey(makeCommandKey(msg));
+const shouldHandleTextMessage = (msg) => registerProcessedKey(makeTextKey(msg));
+const shouldHandleCallbackQuery = async (query) => {
+  const keys = makeCallbackKeys(query);
+  if (!keys.length) {
+    return true;
+  }
+  for (const key of keys) {
+    const accepted = await registerProcessedKey(key);
+    if (!accepted) {
+      return false;
     }
   }
   return true;
 };
-
-const shouldHandleCommandMessage = (msg) =>
-  registerProcessedKey(`cmd:${msg.chat?.id}:${msg.message_id}`);
-
-const shouldHandleTextMessage = (msg) =>
-  registerProcessedKey(`txt:${msg.chat?.id}:${msg.message_id}`);
-
-const shouldHandleCallbackQuery = (callbackId) =>
-  registerProcessedKey(`cb:${callbackId}`);
 
 const parseReportArguments = (rawArgs) => {
   const text = (rawArgs || "").trim();
@@ -258,7 +342,7 @@ const sendMainMenu = async (bot, chatId, name, options = {}) => {
   return sent;
 };
 
-const handleSuccessfulLogin = async (bot, chatId, user) => {
+const handleSuccessfulLogin = async (bot, chatId, user, options = {}) => {
   const previous = getSession(chatId);
 
   if (previous?.loginPromptMessageId) {
@@ -268,13 +352,18 @@ const handleSuccessfulLogin = async (bot, chatId, user) => {
     await deleteMessageSilently(bot, chatId, previous.customPromptMessageId);
   }
 
-  updateSession(chatId, {
-    userId: user._id.toString(),
-    username: user.username,
-    name: user.name,
-    role: user.role,
+  const rawUserId = user?._id || user?.id || user?.userId;
+  const nextSession = {
+    userId: rawUserId ? rawUserId.toString() : undefined,
+    username: user?.username,
+    name: user?.name,
+    role: user?.role,
     state: "authenticated",
-  });
+    apiToken: options.token,
+    apiTokenIssuedAt: options.token ? Date.now() : undefined,
+  };
+
+  updateSession(chatId, nextSession);
 
   return sendMainMenu(bot, chatId, user.name, {
     text: `✅ Xush kelibsiz, ${user.name}!\nQuyidagi tugmalardan kerakli hisobotni tanlang.`,
@@ -282,6 +371,48 @@ const handleSuccessfulLogin = async (bot, chatId, user) => {
 };
 
 const validateAdminCredentials = async (username, password) => {
+  if (usingApiData) {
+    if (!apiClient || !backendApiUrl) {
+      return {
+        ok: false,
+        message: "⚠️ BACKEND_API_URL sozlanmagan. Iltimos, .env faylini tekshiring.",
+      };
+    }
+    try {
+      const response = await apiClient.post("/api/auth/login", { username, password });
+      const { token, user } = response.data || {};
+      if (!user || !token) {
+        return {
+          ok: false,
+          message: "❌ Backend javobida foydalanuvchi yoki token topilmadi.",
+        };
+      }
+      if (user.role !== "admin") {
+        return { ok: false, message: "🚫 Faqat admin foydalanuvchilar botdan foydalanishi mumkin." };
+      }
+
+      const normalizedUser = {
+        _id: user.id || user._id,
+        id: user.id || user._id,
+        username: user.username,
+        name: user.name,
+        role: user.role,
+      };
+
+      return { ok: true, user: normalizedUser, token };
+    } catch (error) {
+      const status = error?.response?.status;
+      const apiMessage = error?.response?.data?.message;
+      if (status === 400 || status === 401) {
+        return { ok: false, message: "❌ Login yoki parol noto'g'ri." };
+      }
+      return {
+        ok: false,
+        message: apiMessage ? `❌ ${apiMessage}` : "❌ Kirishda xatolik yuz berdi.",
+      };
+    }
+  }
+
   const user = await User.findOne({ username });
   if (!user) {
     return { ok: false, message: "❌ Foydalanuvchi topilmadi." };
@@ -480,6 +611,12 @@ const requestReport = async (bot, chatId, session, rawArgs) => {
     return false;
   }
 
+  if (usingApiData && !session.apiToken) {
+    destroySession(chatId);
+    await sendUnauthorized(bot, chatId);
+    return false;
+  }
+
   let range;
   try {
     range = parseReportArguments(rawArgs || "");
@@ -492,13 +629,52 @@ const requestReport = async (bot, chatId, session, rawArgs) => {
 
   try {
     const { fromDate, toDate } = resolveDateRange(range.from, range.to);
-    const { report, orders } = await buildSalesReport(fromDate, toDate);
-    const buffer = await createSalesReportWorkbook({ report, orders, fromDate, toDate });
+    let report;
+    let buffer;
+
+    if (usingApiData) {
+      if (!apiClient) {
+        throw new Error("BACKEND_API_URL sozlanmagan");
+      }
+      const params = {};
+      if (range.from) params.from = range.from;
+      if (range.to) params.to = range.to;
+      const headers = { Authorization: `Bearer ${session.apiToken}` };
+
+      const [summaryResponse, exportResponse] = await Promise.all([
+        apiClient.get("/api/reports/sales", { params, headers }),
+        apiClient.get("/api/reports/sales/export", {
+          params,
+          headers,
+          responseType: "arraybuffer",
+        }),
+      ]);
+
+      report = summaryResponse.data;
+      buffer = exportResponse.data;
+      if (!report || typeof report !== "object") {
+        throw new Error("Backend hisobot ma'lumotini qaytarmadi.");
+      }
+      if (!buffer) {
+        throw new Error("Backend hisobot faylini qaytarmadi.");
+      }
+    } else {
+      const data = await buildSalesReport(fromDate, toDate);
+      report = data.report;
+      const workbookBuffer = await createSalesReportWorkbook({
+        report,
+        orders: data.orders,
+        fromDate,
+        toDate,
+      });
+      buffer = workbookBuffer;
+    }
+
     const filename = `hisobot-${formatDateShort(fromDate)}-${formatDateShort(toDate)}.xlsx`;
 
     await bot.sendDocument(
       chatId,
-      Buffer.from(buffer),
+      Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer),
       {
         caption: formatSummary(report, range.label),
       },
@@ -524,6 +700,21 @@ const requestReport = async (bot, chatId, session, rawArgs) => {
     return true;
   } catch (error) {
     console.error("[TelegramBot] Report error", error);
+    const status = error?.response?.status;
+    if (usingApiData && status === 401) {
+      await bot.editMessageText(
+        "🔐 Sessiya tugadi. Iltimos qayta login qiling.",
+        {
+          chat_id: chatId,
+          message_id: loadingMessage.message_id,
+        }
+      ).catch(() => {});
+      destroySession(chatId);
+      await showLoginIntro(bot, chatId, {
+        message: "🔐 Sessiya tugadi. Qayta login qilish kerak.",
+      });
+      return false;
+    }
     await bot.editMessageText(
       "❌ Hisobotni tayyorlashda xatolik yuz berdi. Iltimos, keyinroq qayta urinib ko'ring.",
       {
@@ -556,38 +747,50 @@ export const initTelegramBot = (options = {}) => {
   let webhookPath = process.env.TELEGRAM_BOT_WEBHOOK_PATH;
   const wantsWebhook = Boolean(webhookUrl);
   const canUseWebhook = wantsWebhook && Boolean(app);
-  let requestPollingRestart = null;
+
+  (async () => {
+    try {
+      await bot.setMyCommands([
+        { command: "start", description: "Boshlash va menyuni ko'rish" },
+        { command: "login", description: "Admin login (masalan: /login admin 1234)" },
+        { command: "menu", description: "Hisobot menyusini ochish" },
+        { command: "report", description: "Hisobot buyurtma qilish" },
+        { command: "logout", description: "Botdan chiqish" },
+        { command: "cancel", description: "Jarayonni bekor qilish" },
+        { command: "help", description: "Yordam va ko'rsatmalar" },
+      ]);
+    } catch (error) {
+      console.warn("[TelegramBot] setMyCommands bajarilmadi", error.message);
+    }
+  })();
 
   const enablePolling = () => {
-    let restartTimer = null;
+    if (pollingSuppressed) {
+      return;
+    }
+    let startLogged = false;
 
     async function startPolling() {
+      // Removed redundant check for polling suppression
       try {
         await bot.deleteWebHook({ drop_pending_updates: false }).catch(() => {});
         await bot.startPolling();
-        console.info("[TelegramBot] Bot ishga tushdi (polling).");
+        if (!startLogged) {
+          console.info("[TelegramBot] Bot ishga tushdi (polling).");
+          startLogged = true;
+        }
+        pollingConflictLogged = false;
       } catch (error) {
         if (isConflictError(error)) {
-          scheduleRestart();
+          logPollingConflictOnce();
           return;
         }
         console.error("[TelegramBot] Pollingni ishga tushirishda xatolik", error);
       }
     }
-
-    function scheduleRestart() {
-      if (restartTimer) {
-        return;
-      }
-      console.warn("[TelegramBot] Boshqa instance polling qilmoqda. 5 soniyadan keyin qayta uriniladi.");
-      restartTimer = setTimeout(() => {
-        restartTimer = null;
-        startPolling();
-      }, 5000);
+    if (!pollingSuppressed) {
+      startPolling();
     }
-
-    requestPollingRestart = scheduleRestart;
-    startPolling();
   };
 
   if (canUseWebhook) {
@@ -639,22 +842,20 @@ export const initTelegramBot = (options = {}) => {
     enablePolling();
   }
 
-  bot.onText(/^\/start$/i, (msg) => {
-    if (!shouldHandleCommandMessage(msg)) {
-      return;
+  bot.onText(/^\/start$/i, async (msg) => {
+    if (await shouldHandleCommandMessage(msg)) {
+      introduceBot(bot, msg.chat.id);
     }
-    introduceBot(bot, msg.chat.id);
   });
 
-  bot.onText(/^\/help$/i, (msg) => {
-    if (!shouldHandleCommandMessage(msg)) {
-      return;
+  bot.onText(/^\/help$/i, async (msg) => {
+    if (await shouldHandleCommandMessage(msg)) {
+      introduceBot(bot, msg.chat.id);
     }
-    introduceBot(bot, msg.chat.id);
   });
 
   bot.onText(/^\/logout$/i, async (msg) => {
-    if (!shouldHandleCommandMessage(msg)) {
+    if (!(await shouldHandleCommandMessage(msg))) {
       return;
     }
     const chatId = msg.chat.id;
@@ -676,7 +877,7 @@ export const initTelegramBot = (options = {}) => {
   });
 
   bot.onText(/^\/login\s+(.+)$/i, async (msg, match) => {
-    if (!shouldHandleCommandMessage(msg)) {
+    if (!(await shouldHandleCommandMessage(msg))) {
       return;
     }
     const chatId = msg.chat.id;
@@ -696,7 +897,7 @@ export const initTelegramBot = (options = {}) => {
         return;
       }
 
-      await handleSuccessfulLogin(bot, chatId, result.user);
+      await handleSuccessfulLogin(bot, chatId, result.user, { token: result.token });
     } catch (error) {
       console.error("[TelegramBot] Login error", error);
       bot.sendMessage(chatId, "❌ Kirishda xatolik yuz berdi. Keyinroq urinib ko'ring.");
@@ -704,7 +905,7 @@ export const initTelegramBot = (options = {}) => {
   });
 
   bot.onText(/^\/menu$/i, async (msg) => {
-    if (!shouldHandleCommandMessage(msg)) {
+    if (!(await shouldHandleCommandMessage(msg))) {
       return;
     }
     const chatId = msg.chat.id;
@@ -717,7 +918,7 @@ export const initTelegramBot = (options = {}) => {
   });
 
   bot.onText(/^\/cancel$/i, async (msg) => {
-    if (!shouldHandleCommandMessage(msg)) {
+    if (!(await shouldHandleCommandMessage(msg))) {
       return;
     }
     const chatId = msg.chat.id;
@@ -739,7 +940,7 @@ export const initTelegramBot = (options = {}) => {
 
 
   bot.onText(/^\/report(?:\s+(.+))?$/i, async (msg, match) => {
-    if (!shouldHandleCommandMessage(msg)) {
+    if (!(await shouldHandleCommandMessage(msg))) {
       return;
     }
     const chatId = msg.chat.id;
@@ -751,7 +952,7 @@ export const initTelegramBot = (options = {}) => {
   bot.on("callback_query", async (query) => {
     const { data, message, id } = query;
 
-    if (!shouldHandleCallbackQuery(id)) {
+    if (!(await shouldHandleCallbackQuery(query))) {
       await bot.answerCallbackQuery(id).catch(() => {});
       return;
     }
@@ -850,7 +1051,7 @@ export const initTelegramBot = (options = {}) => {
       return;
     }
 
-    if (!shouldHandleTextMessage(msg)) {
+    if (!(await shouldHandleTextMessage(msg))) {
       return;
     }
 
@@ -889,7 +1090,7 @@ export const initTelegramBot = (options = {}) => {
           return;
         }
 
-        await handleSuccessfulLogin(bot, chatId, result.user);
+        await handleSuccessfulLogin(bot, chatId, result.user, { token: result.token });
       } catch (error) {
         console.error("[TelegramBot] Login flow error", error);
         bot.sendMessage(chatId, "❌ Kirishda xatolik yuz berdi. Keyinroq urinib ko'ring.");
@@ -906,12 +1107,20 @@ export const initTelegramBot = (options = {}) => {
           text: "🔁 Yana bir hisobot tanlang.",
         });
       }
+      return;
+    }
+
+    if (session.state === "authenticated") {
+      if (lower === "hisobot" || lower === "hisobotlar" || lower === "report") {
+        await sendMainMenu(bot, chatId, session.name || session.username);
+        return;
+      }
     }
   });
 
   bot.on("polling_error", (error) => {
-    if (isConflictError(error) && requestPollingRestart) {
-      requestPollingRestart();
+    if (isConflictError(error)) {
+      logPollingConflictOnce();
       return;
     }
     console.error("[TelegramBot] Polling error", error.message);
