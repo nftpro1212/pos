@@ -10,18 +10,26 @@ import {
   formatDateTime,
 } from "./reportService.js";
 
-const dataMode = (process.env.TELEGRAM_BOT_DATA_MODE || "direct").toLowerCase();
-const usingApiData = dataMode === "api";
-const backendApiUrl = process.env.BACKEND_API_URL ? process.env.BACKEND_API_URL.replace(/\/$/, "") : "";
-const apiClient = usingApiData && backendApiUrl
-  ? axios.create({ baseURL: backendApiUrl, timeout: 20000 })
-  : null;
+let usingApiData = false;
+let backendApiUrl = "";
+let apiClient = null;
 
-if (usingApiData && !backendApiUrl) {
-  console.warn("[TelegramBot] BACKEND_API_URL sozlanmagan, API rejimi ishlamasligi mumkin.");
-} else if (usingApiData) {
-  console.info(`[TelegramBot] API rejimi yoqilgan. Backend URL: ${backendApiUrl}`);
-}
+const refreshApiConfig = () => {
+  const mode = (process.env.TELEGRAM_BOT_DATA_MODE || "direct").toLowerCase();
+  usingApiData = mode === "api";
+  backendApiUrl = process.env.BACKEND_API_URL ? process.env.BACKEND_API_URL.replace(/\/$/, "") : "";
+  apiClient = usingApiData && backendApiUrl
+    ? axios.create({ baseURL: backendApiUrl, timeout: 20000 })
+    : null;
+
+  if (usingApiData && !backendApiUrl) {
+    console.warn("[TelegramBot] BACKEND_API_URL sozlanmagan, API rejimi ishlamasligi mumkin.");
+  } else if (usingApiData) {
+    console.info(`[TelegramBot] API rejimi yoqilgan. Backend URL: ${backendApiUrl}`);
+  }
+};
+
+refreshApiConfig();
 
 const SESSIONS = new Map();
 const SESSION_TTL_MS = 1000 * 60 * 60 * 12; // 12 soat
@@ -728,6 +736,7 @@ const requestReport = async (bot, chatId, session, rawArgs) => {
 
 export const initTelegramBot = (options = {}) => {
   const { app } = options;
+  refreshApiConfig();
   const token = process.env.TELEGRAM_BOT_TOKEN;
   if (!token) {
     console.info("[TelegramBot] TELEGRAM_BOT_TOKEN topilmadi. Bot ishga tushirilmadi.");
