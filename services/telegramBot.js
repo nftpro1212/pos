@@ -52,6 +52,37 @@ const validateDateToken = (value) => /\d{4}-\d{2}-\d{2}/.test(value);
 const isConflictError = (error) =>
   Boolean(error && error.code === "ETELEGRAM" && error.response?.body?.error_code === 409);
 
+const processedKeys = new Map();
+const processedQueue = [];
+const PROCESSED_LIMIT = 3000;
+
+const registerProcessedKey = (key) => {
+  if (!key) {
+    return true;
+  }
+  if (processedKeys.has(key)) {
+    return false;
+  }
+  processedKeys.set(key, Date.now());
+  processedQueue.push(key);
+  if (processedQueue.length > PROCESSED_LIMIT) {
+    const oldestKey = processedQueue.shift();
+    if (oldestKey) {
+      processedKeys.delete(oldestKey);
+    }
+  }
+  return true;
+};
+
+const shouldHandleCommandMessage = (msg) =>
+  registerProcessedKey(`cmd:${msg.chat?.id}:${msg.message_id}`);
+
+const shouldHandleTextMessage = (msg) =>
+  registerProcessedKey(`txt:${msg.chat?.id}:${msg.message_id}`);
+
+const shouldHandleCallbackQuery = (callbackId) =>
+  registerProcessedKey(`cb:${callbackId}`);
+
 const parseReportArguments = (rawArgs) => {
   const text = (rawArgs || "").trim();
   if (!text) {
@@ -609,14 +640,23 @@ export const initTelegramBot = (options = {}) => {
   }
 
   bot.onText(/^\/start$/i, (msg) => {
+    if (!shouldHandleCommandMessage(msg)) {
+      return;
+    }
     introduceBot(bot, msg.chat.id);
   });
 
   bot.onText(/^\/help$/i, (msg) => {
+    if (!shouldHandleCommandMessage(msg)) {
+      return;
+    }
     introduceBot(bot, msg.chat.id);
   });
 
   bot.onText(/^\/logout$/i, async (msg) => {
+    if (!shouldHandleCommandMessage(msg)) {
+      return;
+    }
     const chatId = msg.chat.id;
     const session = getSession(chatId);
     if (session?.menuMessageId) {
@@ -636,6 +676,9 @@ export const initTelegramBot = (options = {}) => {
   });
 
   bot.onText(/^\/login\s+(.+)$/i, async (msg, match) => {
+    if (!shouldHandleCommandMessage(msg)) {
+      return;
+    }
     const chatId = msg.chat.id;
     const args = (match && match[1]) || "";
     const [usernameRaw, ...passwordParts] = args.trim().split(/\s+/);
@@ -661,6 +704,9 @@ export const initTelegramBot = (options = {}) => {
   });
 
   bot.onText(/^\/menu$/i, async (msg) => {
+    if (!shouldHandleCommandMessage(msg)) {
+      return;
+    }
     const chatId = msg.chat.id;
     const session = getSession(chatId);
     if (session?.userId) {
@@ -671,6 +717,9 @@ export const initTelegramBot = (options = {}) => {
   });
 
   bot.onText(/^\/cancel$/i, async (msg) => {
+    if (!shouldHandleCommandMessage(msg)) {
+      return;
+    }
     const chatId = msg.chat.id;
     const session = getSession(chatId);
     if (!session || !session.state || session.state === "authenticated") {
@@ -690,6 +739,9 @@ export const initTelegramBot = (options = {}) => {
 
 
   bot.onText(/^\/report(?:\s+(.+))?$/i, async (msg, match) => {
+    if (!shouldHandleCommandMessage(msg)) {
+      return;
+    }
     const chatId = msg.chat.id;
     const session = getSession(chatId);
     const rawArgs = match ? match[1] : "";
@@ -698,6 +750,11 @@ export const initTelegramBot = (options = {}) => {
 
   bot.on("callback_query", async (query) => {
     const { data, message, id } = query;
+
+    if (!shouldHandleCallbackQuery(id)) {
+      await bot.answerCallbackQuery(id).catch(() => {});
+      return;
+    }
     const chatId = message?.chat.id;
     if (!data || !chatId) {
       await bot.answerCallbackQuery(id).catch(() => {});
@@ -790,6 +847,10 @@ export const initTelegramBot = (options = {}) => {
 
     const text = msg.text.trim();
     if (!text || text.startsWith("/")) {
+      return;
+    }
+
+    if (!shouldHandleTextMessage(msg)) {
       return;
     }
 
