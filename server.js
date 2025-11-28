@@ -60,7 +60,7 @@ app.use(morgan("dev"));
 connectDB();
 
 // Telegram botni ishga tushirish (agar token mavjud bo'lsa)
-const telegramBot = initTelegramBot();
+const telegramBot = initTelegramBot({ app });
 if (telegramBot) {
   app.set("telegramBot", telegramBot);
 }

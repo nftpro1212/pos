@@ -504,7 +504,8 @@ const requestReport = async (bot, chatId, session, rawArgs) => {
   }
 };
 
-export const initTelegramBot = () => {
+export const initTelegramBot = (options = {}) => {
+  const { app } = options;
   const token = process.env.TELEGRAM_BOT_TOKEN;
   if (!token) {
     console.info("[TelegramBot] TELEGRAM_BOT_TOKEN topilmadi. Bot ishga tushirilmadi.");
@@ -519,33 +520,93 @@ export const initTelegramBot = () => {
   }
 
   const bot = new TelegramBot(token, { polling: false });
-  let restartTimer = null;
+  const webhookUrl = process.env.TELEGRAM_BOT_WEBHOOK_URL;
+  const webhookSecret = process.env.TELEGRAM_BOT_WEBHOOK_SECRET;
+  let webhookPath = process.env.TELEGRAM_BOT_WEBHOOK_PATH;
+  const wantsWebhook = Boolean(webhookUrl);
+  const canUseWebhook = wantsWebhook && Boolean(app);
+  let requestPollingRestart = null;
 
-  function scheduleRestart() {
-    if (restartTimer) {
-      return;
+  const enablePolling = () => {
+    let restartTimer = null;
+
+    async function startPolling() {
+      try {
+        await bot.deleteWebHook({ drop_pending_updates: false }).catch(() => {});
+        await bot.startPolling();
+        console.info("[TelegramBot] Bot ishga tushdi (polling).");
+      } catch (error) {
+        if (isConflictError(error)) {
+          scheduleRestart();
+          return;
+        }
+        console.error("[TelegramBot] Pollingni ishga tushirishda xatolik", error);
+      }
     }
-    console.warn("[TelegramBot] Boshqa instance polling qilmoqda. 5 soniyadan keyin qayta uriniladi.");
-    restartTimer = setTimeout(() => {
-      restartTimer = null;
-      startPolling();
-    }, 5000);
-  }
 
-  async function startPolling() {
-    try {
-      await bot.startPolling();
-      console.info("[TelegramBot] Bot ishga tushdi (polling).");
-    } catch (error) {
-      if (isConflictError(error)) {
-        scheduleRestart();
+    function scheduleRestart() {
+      if (restartTimer) {
         return;
       }
-      console.error("[TelegramBot] Pollingni ishga tushirishda xatolik", error);
+      console.warn("[TelegramBot] Boshqa instance polling qilmoqda. 5 soniyadan keyin qayta uriniladi.");
+      restartTimer = setTimeout(() => {
+        restartTimer = null;
+        startPolling();
+      }, 5000);
     }
-  }
 
-  startPolling();
+    requestPollingRestart = scheduleRestart;
+    startPolling();
+  };
+
+  if (canUseWebhook) {
+    if (!webhookPath) {
+      try {
+        const parsed = new URL(webhookUrl);
+        webhookPath = parsed.pathname || "/api/telegram/webhook";
+      } catch (error) {
+        console.warn("[TelegramBot] TELEGRAM_BOT_WEBHOOK_URL noto'g'ri formatda. Default path ishlatiladi.", error.message);
+        webhookPath = "/api/telegram/webhook";
+      }
+    }
+    if (!webhookPath.startsWith("/")) {
+      webhookPath = `/${webhookPath}`;
+    }
+
+    const routeFlagKey = Symbol.for("pos/telegram-webhook-route");
+    if (!app.locals[routeFlagKey]) {
+      app.post(webhookPath, (req, res) => {
+        if (webhookSecret) {
+          const tokenHeader = req.get("X-Telegram-Bot-Api-Secret-Token");
+          if (tokenHeader !== webhookSecret) {
+            return res.sendStatus(401);
+          }
+        }
+        bot.processUpdate(req.body);
+        res.sendStatus(200);
+      });
+      app.locals[routeFlagKey] = { path: webhookPath };
+      console.info(`[TelegramBot] Webhook marshruti ro'yxatga olindi: ${webhookPath}`);
+    }
+
+    (async () => {
+      try {
+        await bot.setWebHook(webhookUrl, {
+          secret_token: webhookSecret || undefined,
+          allowed_updates: ["message", "callback_query"],
+        });
+        console.info(`[TelegramBot] Webhook rejimi yoqildi. URL: ${webhookUrl}`);
+      } catch (error) {
+        console.error("[TelegramBot] Webhookni sozlashda xatolik. Polling rejimga o'tiladi.", error);
+        enablePolling();
+      }
+    })();
+  } else {
+    if (wantsWebhook && !app) {
+      console.warn("[TelegramBot] Express app o'tkazilmagani uchun webhook ishlatilmayapti. Polling rejim ishlatiladi.");
+    }
+    enablePolling();
+  }
 
   bot.onText(/^\/start$/i, (msg) => {
     introduceBot(bot, msg.chat.id);
@@ -788,8 +849,8 @@ export const initTelegramBot = () => {
   });
 
   bot.on("polling_error", (error) => {
-    if (isConflictError(error)) {
-      scheduleRestart();
+    if (isConflictError(error) && requestPollingRestart) {
+      requestPollingRestart();
       return;
     }
     console.error("[TelegramBot] Polling error", error.message);
