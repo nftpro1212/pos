@@ -49,6 +49,9 @@ const presets = {
 
 const validateDateToken = (value) => /\d{4}-\d{2}-\d{2}/.test(value);
 
+const isConflictError = (error) =>
+  Boolean(error && error.code === "ETELEGRAM" && error.response?.body?.error_code === 409);
+
 const parseReportArguments = (rawArgs) => {
   const text = (rawArgs || "").trim();
   if (!text) {
@@ -158,8 +161,41 @@ export const initTelegramBot = () => {
     return null;
   }
 
-  const bot = new TelegramBot(token, { polling: true });
-  console.info("[TelegramBot] Bot ishga tushdi (polling).");
+  const globalKey = Symbol.for("pos/telegram-bot");
+  const existing = globalThis[globalKey];
+  if (existing) {
+    console.info("[TelegramBot] Bot avval ishga tushirilgan, mavjud instance ishlatilmoqda.");
+    return existing;
+  }
+
+  const bot = new TelegramBot(token, { polling: false });
+  let restartTimer = null;
+
+  function scheduleRestart() {
+    if (restartTimer) {
+      return;
+    }
+    console.warn("[TelegramBot] Boshqa instance polling qilmoqda. 5 soniyadan keyin qayta uriniladi.");
+    restartTimer = setTimeout(() => {
+      restartTimer = null;
+      startPolling();
+    }, 5000);
+  }
+
+  async function startPolling() {
+    try {
+      await bot.startPolling();
+      console.info("[TelegramBot] Bot ishga tushdi (polling).");
+    } catch (error) {
+      if (isConflictError(error)) {
+        scheduleRestart();
+        return;
+      }
+      console.error("[TelegramBot] Pollingni ishga tushirishda xatolik", error);
+    }
+  }
+
+  startPolling();
 
   bot.onText(/^\/start$/i, (msg) => {
     introduceBot(bot, msg.chat.id);
@@ -219,6 +255,7 @@ export const initTelegramBot = () => {
     }
   });
 
+
   bot.onText(/^\/report(?:\s+(.+))?$/i, async (msg, match) => {
     const chatId = msg.chat.id;
     const session = getSession(chatId);
@@ -275,8 +312,13 @@ export const initTelegramBot = () => {
   });
 
   bot.on("polling_error", (error) => {
+    if (isConflictError(error)) {
+      scheduleRestart();
+      return;
+    }
     console.error("[TelegramBot] Polling error", error.message);
   });
 
+  globalThis[globalKey] = bot;
   return bot;
 };
