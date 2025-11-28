@@ -23,6 +23,7 @@ import tipRoutes from "./routes/tipRoutes.js";
 import agentRoutes from "./routes/agentRoutes.js";
 import path from "path";
 import { initSocket } from "./socket.js";
+import { initTelegramBot } from "./services/telegramBot.js";
 
 // Import models to register schemas
 import User from "./models/User.js";
@@ -57,6 +58,12 @@ app.use(express.json({ limit: "10mb" }));
 app.use(morgan("dev"));
 
 connectDB();
+
+// Telegram botni ishga tushirish (agar token mavjud bo'lsa)
+const telegramBot = initTelegramBot();
+if (telegramBot) {
+  app.set("telegramBot", telegramBot);
+}
 
 // Routes
 app.use("/api/auth", authRoutes);
