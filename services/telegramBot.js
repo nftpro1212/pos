@@ -109,34 +109,159 @@ const getSession = (chatId) => {
 };
 
 const setSession = (chatId, payload) => {
-  SESSIONS.set(chatId, {
+  const next = {
+    chatId,
     ...payload,
+    expiresAt: Date.now() + SESSION_TTL_MS,
+  };
+  Object.keys(next).forEach((key) => {
+    if (next[key] === undefined) {
+      delete next[key];
+    }
+  });
+  SESSIONS.set(chatId, next);
+  return next;
+};
+
+const updateSession = (chatId, updates) => {
+  const current = getSession(chatId) || { chatId };
+  const next = {
+    ...current,
+    ...updates,
     chatId,
     expiresAt: Date.now() + SESSION_TTL_MS,
+  };
+  Object.keys(next).forEach((key) => {
+    if (next[key] === undefined) {
+      delete next[key];
+    }
   });
+  SESSIONS.set(chatId, next);
+  return next;
 };
 
 const destroySession = (chatId) => {
   SESSIONS.delete(chatId);
 };
 
+const LOGIN_KEYBOARD = {
+  inline_keyboard: [[{ text: "🔐 Tizimga kirish", callback_data: "login:start" }]],
+};
+
+const buildMainMenuKeyboard = () => ({
+  inline_keyboard: [
+    [
+      { text: "📊 Bugun", callback_data: "report:today" },
+      { text: "📈 Kecha", callback_data: "report:yesterday" },
+    ],
+    [
+      { text: "📅 7 kun", callback_data: "report:week" },
+      { text: "📆 30 kun", callback_data: "report:month" },
+    ],
+    [
+      { text: "🗓️ Custom davr", callback_data: "report:custom" },
+    ],
+    [
+      { text: "🚪 Chiqish", callback_data: "logout" },
+    ],
+  ],
+});
+
+const buildCancelMarkup = (scope) => ({
+  inline_keyboard: [[{ text: "❌ Bekor qilish", callback_data: `cancel:${scope}` }]],
+});
+
+const sendMainMenu = (bot, chatId, name, options = {}) => {
+  const baseGreeting = name ? `👋 ${name}, qaysi hisobot kerak?` : "📊 Hisobot menyusi";
+  const text = options.text || baseGreeting;
+  return bot.sendMessage(chatId, text, {
+    reply_markup: buildMainMenuKeyboard(),
+  });
+};
+
+const handleSuccessfulLogin = (bot, chatId, user) => {
+  setSession(chatId, {
+    userId: user._id.toString(),
+    username: user.username,
+    name: user.name,
+    role: user.role,
+    state: "authenticated",
+  });
+
+  return sendMainMenu(bot, chatId, user.name, {
+    text: `✅ Xush kelibsiz, ${user.name}!\nQuyidagi tugmalardan kerakli hisobotni tanlang.`,
+  });
+};
+
+const validateAdminCredentials = async (username, password) => {
+  const user = await User.findOne({ username });
+  if (!user) {
+    return { ok: false, message: "❌ Foydalanuvchi topilmadi." };
+  }
+  if (user.role !== "admin") {
+    return { ok: false, message: "🚫 Faqat admin foydalanuvchilar botdan foydalanishi mumkin." };
+  }
+
+  const passwordOk = await user.comparePassword(password);
+  if (!passwordOk) {
+    return { ok: false, message: "❌ Parol noto'g'ri." };
+  }
+
+  return { ok: true, user };
+};
+
+const startLoginFlow = (bot, chatId) => {
+  updateSession(chatId, { state: "awaiting_login" });
+  return bot.sendMessage(
+    chatId,
+    "🔐 Admin login va parolni bir xil xabarda yuboring. Masalan: admin 1234",
+    { reply_markup: buildCancelMarkup("login") }
+  );
+};
+
+const startCustomRangeFlow = (bot, chatId) => {
+  updateSession(chatId, { state: "awaiting_custom_range" });
+  return bot.sendMessage(
+    chatId,
+    "🗓️ Iltimos, sanalarni yuboring. Masalan: 2025-01-01 2025-01-07 yoki from=2025-01-01 to=2025-01-15",
+    { reply_markup: buildCancelMarkup("custom") }
+  );
+};
+
+const resetFlowState = (chatId) => {
+  const session = getSession(chatId);
+  if (!session) {
+    return;
+  }
+
+  if (session.userId) {
+    updateSession(chatId, { state: "authenticated" });
+  } else {
+    destroySession(chatId);
+  }
+};
+
 const sendUnauthorized = (bot, chatId) => {
   bot.sendMessage(
     chatId,
-    "🔐 Ushbu amaliyot uchun tizimga kirish kerak. \n\n/login <foydalanuvchi> <parol> buyrug'idan foydalaning. faqat adminlar uchun ruxsat etiladi."
+    "🔐 Ushbu amaliyot uchun tizimga kirish kerak. \n\n" +
+      '"Tizimga kirish" tugmasini bosing va login/parolni yuboring.',
+    { reply_markup: LOGIN_KEYBOARD }
   );
 };
 
 const introduceBot = (bot, chatId) => {
+  const session = getSession(chatId);
+  if (session?.userId) {
+    sendMainMenu(bot, chatId, session.name || session.username);
+    return;
+  }
+
   bot.sendMessage(
     chatId,
-    "👋 Assalomu alaykum!\n\nBu bot orqali restoran hisobotlarini telegram orqali tezda yuklab olishingiz mumkin.\n\n" +
-      "Boshlash uchun /login <foydalanuvchi> <parol> buyrug'ini yuboring (faqat admin uchun).\n" +
-      "Hisobot olish uchun /report [davr] buyruqlaridan foydalaning. Masalan:\n" +
-      "• /report — oxirgi 7 kun\n" +
-      "• /report today — bugungi hisobot\n" +
-      "• /report 2025-01-01 2025-01-07 — aniq sanalar\n" +
-      "• /report from=2025-01-01 to=2025-01-31"
+    "👋 Assalomu alaykum!\n\nBu bot orqali restoran hisobotlarini tezda yuklab olishingiz mumkin." +
+      '\nBoshlash uchun "Tizimga kirish" tugmasini bosing va admin login/parolingizni yuboring.',
+    { reply_markup: LOGIN_KEYBOARD }
   );
 };
 
@@ -152,6 +277,63 @@ const formatSummary = (report, rangeLabel) => {
     " so'm\n• Servis: " + (totals.taxCollected?.toLocaleString("uz-UZ") || 0) +
     " so'm"
   );
+};
+
+const requestReport = async (bot, chatId, session, rawArgs) => {
+  if (!session || !session.userId) {
+    sendUnauthorized(bot, chatId);
+    return false;
+  }
+
+  let range;
+  try {
+    range = parseReportArguments(rawArgs || "");
+  } catch (error) {
+    await bot.sendMessage(chatId, `⚠️ ${error.message}`);
+    return false;
+  }
+
+  const loadingMessage = await bot.sendMessage(chatId, "⏳ Hisobot tayyorlanmoqda, iltimos kuting...");
+
+  try {
+    const { fromDate, toDate } = resolveDateRange(range.from, range.to);
+    const { report, orders } = await buildSalesReport(fromDate, toDate);
+    const buffer = await createSalesReportWorkbook({ report, orders, fromDate, toDate });
+    const filename = `hisobot-${formatDateShort(fromDate)}-${formatDateShort(toDate)}.xlsx`;
+
+    await bot.sendDocument(
+      chatId,
+      Buffer.from(buffer),
+      {
+        caption: formatSummary(report, range.label),
+      },
+      {
+        filename,
+        contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      }
+    );
+
+    await bot.editMessageText(
+      `✅ Hisobot tayyor (${range.label || "Tanlangan davr"}). \nYaratilgan: ${formatDateTime(report.generatedAt)}.`,
+      {
+        chat_id: chatId,
+        message_id: loadingMessage.message_id,
+      }
+    );
+
+    updateSession(chatId, { state: "authenticated" });
+    return true;
+  } catch (error) {
+    console.error("[TelegramBot] Report error", error);
+    await bot.editMessageText(
+      "❌ Hisobotni tayyorlashda xatolik yuz berdi. Iltimos, keyinroq qayta urinib ko'ring.",
+      {
+        chat_id: chatId,
+        message_id: loadingMessage.message_id,
+      }
+    );
+    return false;
+  }
 };
 
 export const initTelegramBot = () => {
@@ -206,8 +388,13 @@ export const initTelegramBot = () => {
   });
 
   bot.onText(/^\/logout$/i, (msg) => {
-    destroySession(msg.chat.id);
-    bot.sendMessage(msg.chat.id, "✅ Profilingizdan chiqdingiz. /login orqali yana tizimga kirishingiz mumkin.");
+    const chatId = msg.chat.id;
+    destroySession(chatId);
+    bot.sendMessage(
+      chatId,
+      "🚪 Profilingizdan chiqdingiz. Qayta kirish uchun \"Tizimga kirish\" tugmasidan foydalaning.",
+      { reply_markup: LOGIN_KEYBOARD }
+    );
   });
 
   bot.onText(/^\/login\s+(.+)$/i, async (msg, match) => {
@@ -222,36 +409,44 @@ export const initTelegramBot = () => {
     const password = passwordParts.join(" ");
 
     try {
-      const user = await User.findOne({ username });
-      if (!user) {
-        bot.sendMessage(chatId, "❌ Foydalanuvchi topilmadi." );
-        return;
-      }
-      if (user.role !== "admin") {
-        bot.sendMessage(chatId, "🚫 Faqat admin foydalanuvchilar botdan foydalanishi mumkin.");
+      const result = await validateAdminCredentials(username, password);
+      if (!result.ok) {
+        bot.sendMessage(chatId, result.message);
         return;
       }
 
-      const passwordOk = await user.comparePassword(password);
-      if (!passwordOk) {
-        bot.sendMessage(chatId, "❌ Parol noto'g'ri.");
-        return;
-      }
-
-      setSession(chatId, {
-        userId: user._id.toString(),
-        username: user.username,
-        name: user.name,
-        role: user.role,
-      });
-
-      bot.sendMessage(
-        chatId,
-        `✅ Xush kelibsiz, ${user.name}!\n\nHisobot uchun /report buyrug'idan foydalaning. Masalan /report today yoki /report 2025-01-01 2025-01-07.`
-      );
+      await handleSuccessfulLogin(bot, chatId, result.user);
     } catch (error) {
       console.error("[TelegramBot] Login error", error);
       bot.sendMessage(chatId, "❌ Kirishda xatolik yuz berdi. Keyinroq urinib ko'ring.");
+    }
+  });
+
+  bot.onText(/^\/menu$/i, (msg) => {
+    const chatId = msg.chat.id;
+    const session = getSession(chatId);
+    if (session?.userId) {
+      sendMainMenu(bot, chatId, session.name || session.username);
+    } else {
+      introduceBot(bot, chatId);
+    }
+  });
+
+  bot.onText(/^\/cancel$/i, (msg) => {
+    const chatId = msg.chat.id;
+    const session = getSession(chatId);
+    if (!session || !session.state || session.state === "authenticated") {
+      bot.sendMessage(chatId, "❗️ Bekor qilinadigan jarayon yo'q.");
+      return;
+    }
+
+    resetFlowState(chatId);
+
+    if (session.userId) {
+      bot.sendMessage(chatId, "❌ Amal bekor qilindi.");
+      sendMainMenu(bot, chatId, session.name || session.username);
+    } else {
+      bot.sendMessage(chatId, "❌ Amal bekor qilindi.", { reply_markup: LOGIN_KEYBOARD });
     }
   });
 
@@ -259,55 +454,151 @@ export const initTelegramBot = () => {
   bot.onText(/^\/report(?:\s+(.+))?$/i, async (msg, match) => {
     const chatId = msg.chat.id;
     const session = getSession(chatId);
-    if (!session) {
-      sendUnauthorized(bot, chatId);
+    const rawArgs = match ? match[1] : "";
+    await requestReport(bot, chatId, session, rawArgs);
+  });
+
+  bot.on("callback_query", async (query) => {
+    const { data, message, id } = query;
+    const chatId = message?.chat.id;
+    if (!data || !chatId) {
+      await bot.answerCallbackQuery(id).catch(() => {});
       return;
     }
 
-    let range;
-    try {
-      range = parseReportArguments(match ? match[1] : "");
-    } catch (error) {
-      bot.sendMessage(chatId, `⚠️ ${error.message}`);
+    const session = getSession(chatId);
+
+    if (data === "login:start") {
+      if (session?.userId) {
+        await bot.answerCallbackQuery(id, { text: "Siz allaqachon tizimdasiz." }).catch(() => {});
+        sendMainMenu(bot, chatId, session.name || session.username);
+      } else {
+        await bot.answerCallbackQuery(id).catch(() => {});
+        startLoginFlow(bot, chatId);
+      }
       return;
     }
 
-    const loadingMessage = await bot.sendMessage(chatId, "⏳ Hisobot tayyorlanmoqda, iltimos kuting...");
+    if (data === "cancel:login") {
+      await bot.answerCallbackQuery(id, { text: "Bekor qilindi." }).catch(() => {});
+      resetFlowState(chatId);
+      if (session?.userId) {
+        sendMainMenu(bot, chatId, session.name || session.username);
+      } else {
+        bot.sendMessage(chatId, "❌ Tizimga kirish bekor qilindi.", { reply_markup: LOGIN_KEYBOARD });
+      }
+      return;
+    }
 
-    try {
-      const { fromDate, toDate } = resolveDateRange(range.from, range.to);
-      const { report, orders } = await buildSalesReport(fromDate, toDate);
-      const buffer = await createSalesReportWorkbook({ report, orders, fromDate, toDate });
-      const filename = `hisobot-${formatDateShort(fromDate)}-${formatDateShort(toDate)}.xlsx`;
+    if (data === "cancel:custom") {
+      await bot.answerCallbackQuery(id, { text: "Bekor qilindi." }).catch(() => {});
+      resetFlowState(chatId);
+      if (session?.userId) {
+        sendMainMenu(bot, chatId, session.name || session.username);
+      }
+      return;
+    }
 
-      await bot.sendDocument(
+    if (data === "logout") {
+      await bot.answerCallbackQuery(id, { text: "Chiqdingiz." }).catch(() => {});
+      destroySession(chatId);
+      bot.sendMessage(
         chatId,
-        Buffer.from(buffer),
-        {
-          caption: formatSummary(report, range.label),
-        },
-        {
-          filename,
-          contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        }
+        "🚪 Profilingizdan chiqdingiz. Qayta kirish uchun \"Tizimga kirish\" tugmasidan foydalaning.",
+        { reply_markup: LOGIN_KEYBOARD }
       );
+      return;
+    }
 
-      await bot.editMessageText(
-        `✅ Hisobot tayyor (${range.label || "Tanlangan davr"}). \nYaratilgan: ${formatDateTime(report.generatedAt)}.`,
-        {
-          chat_id: chatId,
-          message_id: loadingMessage.message_id,
+    if (data.startsWith("report:")) {
+      if (!session?.userId) {
+        await bot.answerCallbackQuery(id, {
+          text: "Avval tizimga kiring.",
+          show_alert: true,
+        }).catch(() => {});
+        return;
+      }
+
+      const rangeKey = data.split(":")[1];
+      if (rangeKey === "custom") {
+        await bot.answerCallbackQuery(id).catch(() => {});
+        startCustomRangeFlow(bot, chatId);
+        return;
+      }
+
+      await bot.answerCallbackQuery(id).catch(() => {});
+      await requestReport(bot, chatId, session, rangeKey);
+      return;
+    }
+
+    await bot.answerCallbackQuery(id).catch(() => {});
+  });
+
+  bot.on("message", async (msg) => {
+    if (!msg.text) {
+      return;
+    }
+    if (msg.from?.is_bot) {
+      return;
+    }
+
+    const text = msg.text.trim();
+    if (!text || text.startsWith("/")) {
+      return;
+    }
+
+    const chatId = msg.chat.id;
+    const session = getSession(chatId);
+    if (!session || !session.state) {
+      return;
+    }
+
+    const lower = text.toLowerCase();
+    if (lower === "cancel" || lower === "bekor" || lower === "stop") {
+      resetFlowState(chatId);
+      if (session.userId) {
+        bot.sendMessage(chatId, "❌ Amal bekor qilindi.");
+        sendMainMenu(bot, chatId, session.name || session.username);
+      } else {
+        bot.sendMessage(chatId, "❌ Amal bekor qilindi.", { reply_markup: LOGIN_KEYBOARD });
+      }
+      return;
+    }
+
+    if (session.state === "awaiting_login") {
+      const [usernameRaw, ...passwordParts] = text.split(/\s+/);
+      if (!usernameRaw || passwordParts.length === 0) {
+        bot.sendMessage(chatId, "Iltimos login va parolni probel bilan ajratib yuboring. Masalan: admin 1234");
+        return;
+      }
+
+      const username = usernameRaw.trim();
+      const password = passwordParts.join(" ");
+
+      try {
+        const result = await validateAdminCredentials(username, password);
+        if (!result.ok) {
+          bot.sendMessage(chatId, result.message);
+          return;
         }
-      );
-    } catch (error) {
-      console.error("[TelegramBot] Report error", error);
-      bot.editMessageText(
-        "❌ Hisobotni tayyorlashda xatolik yuz berdi. Iltimos, keyinroq qayta urinib ko'ring.",
-        {
-          chat_id: chatId,
-          message_id: loadingMessage.message_id,
-        }
-      );
+
+        await handleSuccessfulLogin(bot, chatId, result.user);
+      } catch (error) {
+        console.error("[TelegramBot] Login flow error", error);
+        bot.sendMessage(chatId, "❌ Kirishda xatolik yuz berdi. Keyinroq urinib ko'ring.");
+      }
+      return;
+    }
+
+    if (session.state === "awaiting_custom_range") {
+      const success = await requestReport(bot, chatId, session, text);
+      if (success) {
+        const refreshed = getSession(chatId);
+        const displayName = refreshed?.name || refreshed?.username;
+        sendMainMenu(bot, chatId, displayName, {
+          text: "🔁 Yana bir hisobot tanlang.",
+        });
+      }
     }
   });
 
