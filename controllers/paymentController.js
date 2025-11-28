@@ -10,6 +10,7 @@ import {
   sendToNetworkPrinter,
 } from "../utils/printer.js";
 import { dispatchPrintJob, hasActivePrintAgent } from "../socket.js";
+import { resolveTaxRate } from "../utils/tax.js";
 
 const resolveDispatchMode = (value, fallback = "direct") => {
   const allowed = new Set(["direct", "agent"]);
@@ -38,14 +39,22 @@ const shouldAutoprintForPayment = (printer = {}) => {
   return false;
 };
 
-const buildRestaurantInfo = (settings = {}) => ({
-  name: settings.restaurantName || "ZarPOS Restoran",
-  address: settings.restaurantAddress || "",
-  phone: settings.restaurantPhone || "",
-  email: settings.restaurantEmail || "",
-  taxName: settings.taxSettings?.taxName || "",
-  taxRate: settings.taxSettings?.taxRate || 0,
-});
+const buildRestaurantInfo = (settings = {}) => {
+  const taxRate = resolveTaxRate(
+    [settings.taxSettings?.serviceCharge, settings.taxSettings?.taxRate],
+    0,
+  );
+
+  return {
+    name: settings.restaurantName || "ZarPOS Restoran",
+    address: settings.restaurantAddress || "",
+    phone: settings.restaurantPhone || "",
+    email: settings.restaurantEmail || "",
+    taxName: settings.taxSettings?.taxName || "",
+    taxRate,
+    taxPercent: Number((taxRate * 100).toFixed(2)),
+  };
+};
 
 const triggerAutomaticPrints = async (
   { settings, order, payment },

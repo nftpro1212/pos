@@ -9,6 +9,7 @@ import InventoryItem from "../models/InventoryItem.js";
 import InventoryMovement from "../models/InventoryMovement.js";
 import ActionLog from "../models/ActionLog.js";
 import { fiscalizeOrder } from "../utils/taxIntegrationService.js";
+import { resolveTaxRate } from "../utils/tax.js";
 import {
   resolveWarehouse,
   getOrCreateStock,
@@ -794,7 +795,10 @@ export const createOrder = async (req, res) => {
     const systemSettings = (await Settings.findOne()) || {};
     const taxSettings = systemSettings.taxSettings || {};
     const taxIntegration = systemSettings.taxIntegration || {};
-    const taxRate = typeof taxSettings.taxRate === "number" ? taxSettings.taxRate : 0.12;
+    const taxRate = resolveTaxRate(
+      [taxSettings.serviceCharge, taxSettings.taxRate],
+      0.12,
+    );
     const discountValue = payload.discount || 0;
     const incomingItems = Array.isArray(payload.items) ? payload.items : [];
     const menuItemIds = Array.from(

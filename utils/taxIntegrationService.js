@@ -1,11 +1,15 @@
 import axios from "axios";
+import { resolveTaxRate } from "./tax.js";
 
 // Simple in-memory token cache for sandbox usage
 let cachedToken = null;
 let tokenExpiresAt = 0;
 
 const buildFiscalPayload = (order, config, taxSettings) => {
-  const vatRate = taxSettings?.taxRate ?? config?.defaultVatRate ?? 0.12;
+  const vatRate = resolveTaxRate(
+    [taxSettings?.taxRate, taxSettings?.serviceCharge, config?.defaultVatRate],
+    0.12,
+  );
   const vatPercent = Math.round((vatRate || 0) * 100);
 
   return {
