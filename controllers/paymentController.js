@@ -326,7 +326,12 @@ export const createPayment = async (req, res) => {
       await order.save();
 
       if (order.table) {
-        await Table.findByIdAndUpdate(order.table, { status: "free" });
+        await Table.findByIdAndUpdate(order.table, {
+          status: "free",
+          assignedTo: null,
+          assignedToName: "",
+          assignedAt: null,
+        });
         await Order.deleteMany({ table: order.table, status: { $ne: "closed" } });
       }
 

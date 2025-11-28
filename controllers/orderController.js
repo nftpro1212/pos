@@ -770,6 +770,27 @@ const triggerFrontReceiptPrint = async ({ order, settings }) => {
 export const createOrder = async (req, res) => {
   try {
     const payload = req.body;
+    let targetTable = null;
+
+    if (payload.tableId) {
+      targetTable = await Table.findById(payload.tableId).select("assignedTo status");
+
+      if (!targetTable) {
+        return res.status(404).json({ message: "Stol topilmadi" });
+      }
+
+      const assignedId = targetTable.assignedTo ? String(targetTable.assignedTo) : null;
+      const requesterId = req.user?._id ? String(req.user._id) : null;
+
+      if (
+        req.user?.role === "ofitsiant" &&
+        assignedId &&
+        assignedId !== requesterId
+      ) {
+        return res.status(403).json({ message: "Bu stol boshqa ofitsiantga biriktirilgan" });
+      }
+    }
+
     const systemSettings = (await Settings.findOne()) || {};
     const taxSettings = systemSettings.taxSettings || {};
     const taxIntegration = systemSettings.taxIntegration || {};
@@ -837,7 +858,17 @@ export const createOrder = async (req, res) => {
     });
 
     // update table status
-    if (payload.tableId) await Table.findByIdAndUpdate(payload.tableId, { status: "occupied" });
+    if (payload.tableId) {
+      const tableUpdate = { status: "occupied" };
+      if (req.user?.role === "ofitsiant") {
+        const waiterName = (req.user?.name || req.user?.fullName || req.user?.username || "").trim();
+        tableUpdate.assignedTo = req.user._id;
+        tableUpdate.assignedToName = waiterName;
+        tableUpdate.assignedAt = new Date();
+      }
+
+      await Table.findByIdAndUpdate(payload.tableId, tableUpdate);
+    }
 
     if (taxIntegration?.enabled && taxIntegration.autoFiscalize !== false) {
       fiscalizeOrder(order, taxIntegration, { ...taxSettings, currency: systemSettings.currency })
