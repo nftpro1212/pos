@@ -171,15 +171,67 @@ const buildCancelMarkup = (scope) => ({
   inline_keyboard: [[{ text: "❌ Bekor qilish", callback_data: `cancel:${scope}` }]],
 });
 
-const sendMainMenu = (bot, chatId, name, options = {}) => {
-  const baseGreeting = name ? `👋 ${name}, qaysi hisobot kerak?` : "📊 Hisobot menyusi";
-  const text = options.text || baseGreeting;
-  return bot.sendMessage(chatId, text, {
-    reply_markup: buildMainMenuKeyboard(),
-  });
+const deleteMessageSilently = async (bot, chatId, messageId) => {
+  if (!messageId) {
+    return false;
+  }
+  try {
+    await bot.deleteMessage(chatId, messageId);
+    return true;
+  } catch (error) {
+    const description = error?.response?.body?.description || error.message;
+    const lower = description ? description.toLowerCase() : "";
+    if (!lower.includes("message to delete not found") && !lower.includes("message can't be deleted")) {
+      console.warn("[TelegramBot] Xabarni o'chirishning imkoni bo'lmadi.", description);
+    }
+    return false;
+  }
 };
 
-const handleSuccessfulLogin = (bot, chatId, user) => {
+const sendMainMenu = async (bot, chatId, name, options = {}) => {
+  const baseGreeting = name ? `👋 ${name}, qaysi hisobot kerak?` : "📊 Hisobot menyusi";
+  const text = options.text || baseGreeting;
+  const replyMarkup = buildMainMenuKeyboard();
+  const session = getSession(chatId);
+  const existingId = session?.menuMessageId;
+
+  if (existingId) {
+    try {
+      await bot.editMessageText(text, {
+        chat_id: chatId,
+        message_id: existingId,
+        reply_markup: replyMarkup,
+      });
+      updateSession(chatId, { menuMessageId: existingId });
+      return { message_id: existingId };
+    } catch (error) {
+      const description = error?.response?.body?.description || error.message;
+      const lower = description ? description.toLowerCase() : "";
+      if (lower.includes("message is not modified")) {
+        return { message_id: existingId };
+      }
+      if (!lower.includes("message to edit not found")) {
+        console.warn("[TelegramBot] Menu edit failed, yangi xabar yuboriladi.", description);
+      }
+      updateSession(chatId, { menuMessageId: undefined });
+    }
+  }
+
+  const sent = await bot.sendMessage(chatId, text, { reply_markup: replyMarkup });
+  updateSession(chatId, { menuMessageId: sent.message_id });
+  return sent;
+};
+
+const handleSuccessfulLogin = async (bot, chatId, user) => {
+  const previous = getSession(chatId);
+
+  if (previous?.loginPromptMessageId) {
+    await deleteMessageSilently(bot, chatId, previous.loginPromptMessageId);
+  }
+  if (previous?.customPromptMessageId) {
+    await deleteMessageSilently(bot, chatId, previous.customPromptMessageId);
+  }
+
   setSession(chatId, {
     userId: user._id.toString(),
     username: user.username,
@@ -210,32 +262,79 @@ const validateAdminCredentials = async (username, password) => {
   return { ok: true, user };
 };
 
-const startLoginFlow = (bot, chatId) => {
-  updateSession(chatId, { state: "awaiting_login" });
-  return bot.sendMessage(
-    chatId,
-    "🔐 Admin login va parolni bir xil xabarda yuboring. Masalan: admin 1234",
-    { reply_markup: buildCancelMarkup("login") }
-  );
+const startLoginFlow = async (bot, chatId) => {
+  const session = updateSession(chatId, { state: "awaiting_login" });
+  const text = "🔐 Admin login va parolni bir xil xabarda yuboring. Masalan: admin 1234";
+  const replyMarkup = buildCancelMarkup("login");
+  const existingId = session?.loginPromptMessageId;
+
+  if (existingId) {
+    try {
+      await bot.editMessageText(text, {
+        chat_id: chatId,
+        message_id: existingId,
+        reply_markup: replyMarkup,
+      });
+      updateSession(chatId, { loginPromptMessageId: existingId, customPromptMessageId: undefined });
+      return { message_id: existingId };
+    } catch (error) {
+      const description = error?.response?.body?.description || error.message;
+      if (description?.toLowerCase().includes("message is not modified")) {
+        return { message_id: existingId };
+      }
+      updateSession(chatId, { loginPromptMessageId: undefined });
+    }
+  }
+
+  const sent = await bot.sendMessage(chatId, text, { reply_markup: replyMarkup });
+  updateSession(chatId, { loginPromptMessageId: sent.message_id, customPromptMessageId: undefined });
+  return sent;
 };
 
-const startCustomRangeFlow = (bot, chatId) => {
-  updateSession(chatId, { state: "awaiting_custom_range" });
-  return bot.sendMessage(
-    chatId,
-    "🗓️ Iltimos, sanalarni yuboring. Masalan: 2025-01-01 2025-01-07 yoki from=2025-01-01 to=2025-01-15",
-    { reply_markup: buildCancelMarkup("custom") }
-  );
+const startCustomRangeFlow = async (bot, chatId) => {
+  const session = updateSession(chatId, { state: "awaiting_custom_range" });
+  const text = "🗓️ Iltimos, sanalarni yuboring. Masalan: 2025-01-01 2025-01-07 yoki from=2025-01-01 to=2025-01-15";
+  const replyMarkup = buildCancelMarkup("custom");
+  const existingId = session?.customPromptMessageId;
+
+  if (existingId) {
+    try {
+      await bot.editMessageText(text, {
+        chat_id: chatId,
+        message_id: existingId,
+        reply_markup: replyMarkup,
+      });
+      updateSession(chatId, { customPromptMessageId: existingId });
+      return { message_id: existingId };
+    } catch (error) {
+      const description = error?.response?.body?.description || error.message;
+      if (description?.toLowerCase().includes("message is not modified")) {
+        return { message_id: existingId };
+      }
+      updateSession(chatId, { customPromptMessageId: undefined });
+    }
+  }
+
+  const sent = await bot.sendMessage(chatId, text, { reply_markup: replyMarkup });
+  updateSession(chatId, { customPromptMessageId: sent.message_id });
+  return sent;
 };
 
-const resetFlowState = (chatId) => {
+const resetFlowState = async (bot, chatId) => {
   const session = getSession(chatId);
   if (!session) {
     return;
   }
 
+  if (session.loginPromptMessageId) {
+    await deleteMessageSilently(bot, chatId, session.loginPromptMessageId);
+  }
+  if (session.customPromptMessageId) {
+    await deleteMessageSilently(bot, chatId, session.customPromptMessageId);
+  }
+
   if (session.userId) {
-    updateSession(chatId, { state: "authenticated" });
+    updateSession(chatId, { state: "authenticated", loginPromptMessageId: undefined, customPromptMessageId: undefined });
   } else {
     destroySession(chatId);
   }
@@ -250,14 +349,14 @@ const sendUnauthorized = (bot, chatId) => {
   );
 };
 
-const introduceBot = (bot, chatId) => {
+const introduceBot = async (bot, chatId) => {
   const session = getSession(chatId);
   if (session?.userId) {
-    sendMainMenu(bot, chatId, session.name || session.username);
+    await sendMainMenu(bot, chatId, session.name || session.username);
     return;
   }
 
-  bot.sendMessage(
+  await bot.sendMessage(
     chatId,
     "👋 Assalomu alaykum!\n\nBu bot orqali restoran hisobotlarini tezda yuklab olishingiz mumkin." +
       '\nBoshlash uchun "Tizimga kirish" tugmasini bosing va admin login/parolingizni yuboring.',
@@ -321,7 +420,11 @@ const requestReport = async (bot, chatId, session, rawArgs) => {
       }
     );
 
-    updateSession(chatId, { state: "authenticated" });
+    if (session?.customPromptMessageId) {
+      await deleteMessageSilently(bot, chatId, session.customPromptMessageId);
+    }
+
+    updateSession(chatId, { state: "authenticated", customPromptMessageId: undefined });
     return true;
   } catch (error) {
     console.error("[TelegramBot] Report error", error);
@@ -387,10 +490,21 @@ export const initTelegramBot = () => {
     introduceBot(bot, msg.chat.id);
   });
 
-  bot.onText(/^\/logout$/i, (msg) => {
+  bot.onText(/^\/logout$/i, async (msg) => {
     const chatId = msg.chat.id;
+    const session = getSession(chatId);
+    if (session?.menuMessageId) {
+      await deleteMessageSilently(bot, chatId, session.menuMessageId);
+    }
+    if (session?.loginPromptMessageId) {
+      await deleteMessageSilently(bot, chatId, session.loginPromptMessageId);
+    }
+    if (session?.customPromptMessageId) {
+      await deleteMessageSilently(bot, chatId, session.customPromptMessageId);
+    }
+
     destroySession(chatId);
-    bot.sendMessage(
+    await bot.sendMessage(
       chatId,
       "🚪 Profilingizdan chiqdingiz. Qayta kirish uchun \"Tizimga kirish\" tugmasidan foydalaning.",
       { reply_markup: LOGIN_KEYBOARD }
@@ -422,17 +536,17 @@ export const initTelegramBot = () => {
     }
   });
 
-  bot.onText(/^\/menu$/i, (msg) => {
+  bot.onText(/^\/menu$/i, async (msg) => {
     const chatId = msg.chat.id;
     const session = getSession(chatId);
     if (session?.userId) {
-      sendMainMenu(bot, chatId, session.name || session.username);
+      await sendMainMenu(bot, chatId, session.name || session.username);
     } else {
-      introduceBot(bot, chatId);
+      await introduceBot(bot, chatId);
     }
   });
 
-  bot.onText(/^\/cancel$/i, (msg) => {
+  bot.onText(/^\/cancel$/i, async (msg) => {
     const chatId = msg.chat.id;
     const session = getSession(chatId);
     if (!session || !session.state || session.state === "authenticated") {
@@ -440,11 +554,11 @@ export const initTelegramBot = () => {
       return;
     }
 
-    resetFlowState(chatId);
+    await resetFlowState(bot, chatId);
 
     if (session.userId) {
       bot.sendMessage(chatId, "❌ Amal bekor qilindi.");
-      sendMainMenu(bot, chatId, session.name || session.username);
+      await sendMainMenu(bot, chatId, session.name || session.username);
     } else {
       bot.sendMessage(chatId, "❌ Amal bekor qilindi.", { reply_markup: LOGIN_KEYBOARD });
     }
@@ -471,19 +585,19 @@ export const initTelegramBot = () => {
     if (data === "login:start") {
       if (session?.userId) {
         await bot.answerCallbackQuery(id, { text: "Siz allaqachon tizimdasiz." }).catch(() => {});
-        sendMainMenu(bot, chatId, session.name || session.username);
+        await sendMainMenu(bot, chatId, session.name || session.username);
       } else {
         await bot.answerCallbackQuery(id).catch(() => {});
-        startLoginFlow(bot, chatId);
+        await startLoginFlow(bot, chatId);
       }
       return;
     }
 
     if (data === "cancel:login") {
       await bot.answerCallbackQuery(id, { text: "Bekor qilindi." }).catch(() => {});
-      resetFlowState(chatId);
+      await resetFlowState(bot, chatId);
       if (session?.userId) {
-        sendMainMenu(bot, chatId, session.name || session.username);
+        await sendMainMenu(bot, chatId, session.name || session.username);
       } else {
         bot.sendMessage(chatId, "❌ Tizimga kirish bekor qilindi.", { reply_markup: LOGIN_KEYBOARD });
       }
@@ -492,15 +606,25 @@ export const initTelegramBot = () => {
 
     if (data === "cancel:custom") {
       await bot.answerCallbackQuery(id, { text: "Bekor qilindi." }).catch(() => {});
-      resetFlowState(chatId);
+      await resetFlowState(bot, chatId);
       if (session?.userId) {
-        sendMainMenu(bot, chatId, session.name || session.username);
+        await sendMainMenu(bot, chatId, session.name || session.username);
       }
       return;
     }
 
     if (data === "logout") {
       await bot.answerCallbackQuery(id, { text: "Chiqdingiz." }).catch(() => {});
+      const sessionForLogout = getSession(chatId);
+      if (sessionForLogout?.menuMessageId) {
+        await deleteMessageSilently(bot, chatId, sessionForLogout.menuMessageId);
+      }
+      if (sessionForLogout?.loginPromptMessageId) {
+        await deleteMessageSilently(bot, chatId, sessionForLogout.loginPromptMessageId);
+      }
+      if (sessionForLogout?.customPromptMessageId) {
+        await deleteMessageSilently(bot, chatId, sessionForLogout.customPromptMessageId);
+      }
       destroySession(chatId);
       bot.sendMessage(
         chatId,
@@ -522,7 +646,7 @@ export const initTelegramBot = () => {
       const rangeKey = data.split(":")[1];
       if (rangeKey === "custom") {
         await bot.answerCallbackQuery(id).catch(() => {});
-        startCustomRangeFlow(bot, chatId);
+        await startCustomRangeFlow(bot, chatId);
         return;
       }
 
@@ -555,10 +679,10 @@ export const initTelegramBot = () => {
 
     const lower = text.toLowerCase();
     if (lower === "cancel" || lower === "bekor" || lower === "stop") {
-      resetFlowState(chatId);
+      await resetFlowState(bot, chatId);
       if (session.userId) {
         bot.sendMessage(chatId, "❌ Amal bekor qilindi.");
-        sendMainMenu(bot, chatId, session.name || session.username);
+        await sendMainMenu(bot, chatId, session.name || session.username);
       } else {
         bot.sendMessage(chatId, "❌ Amal bekor qilindi.", { reply_markup: LOGIN_KEYBOARD });
       }
@@ -595,7 +719,7 @@ export const initTelegramBot = () => {
       if (success) {
         const refreshed = getSession(chatId);
         const displayName = refreshed?.name || refreshed?.username;
-        sendMainMenu(bot, chatId, displayName, {
+        await sendMainMenu(bot, chatId, displayName, {
           text: "🔁 Yana bir hisobot tanlang.",
         });
       }
