@@ -1121,7 +1121,9 @@ export const initTelegramBot = (options = {}) => {
 
     if (session.state === "authenticated") {
       if (lower === "hisobot" || lower === "hisobotlar" || lower === "report") {
-        await sendMainMenu(bot, chatId, session.name || session.username);
+        await sendMainMenu(bot, chatId, session.name || session.username, {
+          text: "📊 Qaysi hisobot kerak? Quyidagi tugmalardan birini tanlang.",
+        });
         return;
       }
     }
