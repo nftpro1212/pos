@@ -9,7 +9,7 @@ const staff = [
   { name: "Admin", username: "admin", password: "1234", role: "admin", pin: "0000" },
   { name: "Kassir Dilshod", username: "dilshod", password: "pass123", role: "kassir", pin: "1111" },
   { name: "Ofitsiant Sardor", username: "sardor", password: "pass123", role: "ofitsiant", pin: "2222" },
-  { name: "Oshpaz Lola", username: "lola", password: "pass123", role: "oshpaz", pin: "3333" },
+  { name: "", username: "lola", password: "pass123", role: "oshpaz", pin: "3333" },
 ];
 
 async function seedStaff() {
