@@ -824,6 +824,11 @@ export const createOrder = async (req, res) => {
       const directPrinterIds = Array.isArray(item?.productionPrinterIds) ? item.productionPrinterIds : [];
       const menuPrinterIds = Array.isArray(menuDoc?.productionPrinterIds) ? menuDoc.productionPrinterIds : [];
       const productionPrinterIds = Array.from(new Set([...directPrinterIds, ...menuPrinterIds].map(String).filter(Boolean)));
+      const pricingMode = item?.pricingMode || menuDoc?.pricingMode || "fixed";
+      const weightUnit = pricingMode === "weight"
+        ? (item?.weightUnit || menuDoc?.weightUnit || "")
+        : (item?.weightUnit || "");
+      const displayQty = item?.displayQty || "";
 
       return {
         menuItem: item.menuItem,
@@ -833,6 +838,9 @@ export const createOrder = async (req, res) => {
         notes: item.notes || "",
         portionKey: item.portionKey || "standard",
         portionLabel: item.portionLabel || "",
+        pricingMode,
+        weightUnit,
+        displayQty,
         modifiers: Array.isArray(item.modifiers) ? item.modifiers : [],
         isBlocked: Boolean(item.isBlocked),
         productionPrinterIds,

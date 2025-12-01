@@ -14,6 +14,13 @@ const orderItemSchema = new mongoose.Schema({
   notes: String,
   portionKey: { type: String, trim: true, default: "standard" },
   portionLabel: { type: String, trim: true, default: "" },
+  pricingMode: {
+    type: String,
+    enum: ["fixed", "weight", "portion"],
+    default: "fixed",
+  },
+  weightUnit: { type: String, trim: true, default: "" },
+  displayQty: { type: String, trim: true, default: "" },
   modifiers: [modifierSchema],
   isBlocked: { type: Boolean, default: false },
   productionPrinterIds: { type: [String], default: [] },
