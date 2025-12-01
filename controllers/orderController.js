@@ -910,14 +910,35 @@ export const createOrder = async (req, res) => {
 
 export const listOrders = async (req, res) => {
   const filter = {};
-  
-  // Dostavka va soboy buyurtmalarini filterlash
-  if (req.query.deliveryOnly === "true") {
+
+  const { deliveryOnly, isDelivery, tableId } = req.query;
+
+  if (deliveryOnly === "true") {
     filter.$or = [{ isDelivery: true }, { type: "soboy" }];
-  } else if (req.query.isDelivery !== undefined) {
-    filter.isDelivery = req.query.isDelivery === "true";
+  } else if (typeof isDelivery !== "undefined") {
+    filter.isDelivery = isDelivery === "true";
   }
-  
+
+  if (tableId) {
+    if (!Types.ObjectId.isValid(tableId)) {
+      return res.status(400).json({ message: "Noto'g'ri stol identifikatori" });
+    }
+
+    filter.table = new Types.ObjectId(tableId);
+
+    if (req.user?.role === "ofitsiant") {
+      const table = await Table.findById(tableId).select("assignedTo assignedToName");
+      if (table) {
+        const assignedId = table.assignedTo ? table.assignedTo.toString() : null;
+        const userId = req.user?._id ? req.user._id.toString() : null;
+
+        if (assignedId && userId && assignedId !== userId) {
+          return res.status(403).json({ message: "Bu stol boshqa ofitsiantga biriktirilgan." });
+        }
+      }
+    }
+  }
+
   const orders = await Order.find(filter)
     .sort({ createdAt: -1 })
     .populate("items.menuItem")
