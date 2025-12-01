@@ -21,6 +21,282 @@ const resolveAgentChannel = (value, fallback = "default") => {
   return fallback;
 };
 
+const buildUpdatePaths = (prefix, fields = {}) => {
+  const entries = Object.entries(fields).filter(([, value]) => value !== undefined);
+  const mapped = entries.map(([key, value]) => [`${prefix}.${key}`, value]);
+  return Object.fromEntries(mapped);
+};
+
+const persistPrinterPatch = async (printer, fields = {}) => {
+  if (!printer?._id) return;
+  const update = buildUpdatePaths("printerSettings.printers.$", fields);
+  if (!Object.keys(update).length) return;
+  await Settings.updateOne({ "printerSettings.printers._id": printer._id }, { $set: update });
+};
+
+const persistBasePrinterPatch = async (fields = {}) => {
+  const update = buildUpdatePaths("printerSettings", fields);
+  if (!Object.keys(update).length) return;
+  await Settings.updateOne({}, { $set: update });
+};
+
+const resolvePrinterConnectionConfig = (settings, printer, overrides = {}) => {
+  const printerSettings = settings?.printerSettings || {};
+  const dispatchMode = resolveDispatchMode(
+    overrides.dispatchMode ?? printer?.dispatchMode ?? printerSettings.dispatchMode
+  );
+
+  const agentChannel = resolveAgentChannel(
+    overrides.agentChannel,
+    printer?.agentChannel || printerSettings.agentChannel || settings?._id?.toString() || "default"
+  );
+
+  const ipAddress =
+    overrides.ipAddress ??
+    printer?.ipAddress ??
+    printerSettings.ipAddress ??
+    "";
+
+  const resolvedPort =
+    overrides.port ??
+    printer?.port ??
+    printerSettings.port ??
+    9100;
+
+  const port = Number(resolvedPort) || 0;
+
+  return {
+    dispatchMode,
+    agentChannel,
+    ipAddress,
+    port,
+  };
+};
+
+const tcpPing = ({ ipAddress, port, timeoutMs = 5000 }) =>
+  new Promise((resolve) => {
+    const socket = new net.Socket();
+    let settled = false;
+
+    const finalize = (result) => {
+      if (settled) return;
+      settled = true;
+      try {
+        socket.destroy();
+      } catch (err) {
+        // ignore cleanup errors
+      }
+      resolve(result);
+    };
+
+    socket.setTimeout(Number(timeoutMs) || 5000);
+
+    socket.once("connect", () => finalize({ success: true }));
+    socket.once("timeout", () => finalize({ success: false, message: "Ulanish vaqtidan oshdi" }));
+    socket.once("error", (error) => finalize({ success: false, message: error?.message || "Ulanish xatosi" }));
+
+    try {
+      socket.connect(port, ipAddress);
+    } catch (error) {
+      finalize({ success: false, message: error?.message || "Soket ulanmadi" });
+    }
+  });
+
+const executePrinterConnectionTest = async ({
+  settings,
+  printer,
+  config,
+  timeoutMs,
+}) => {
+  const printerSettings = settings?.printerSettings || {};
+  const printerId = printer?._id ? printer._id.toString() : null;
+  const { dispatchMode, agentChannel, ipAddress, port } = config;
+  const now = new Date();
+
+  const basePatch = {
+    connectionStatus: "disconnected",
+    lastConnectionTest: now,
+    dispatchMode,
+    agentChannel,
+  };
+
+  const printerIdentity = {
+    printerId,
+    name: printer?.name || printerSettings.printerName || "Printer",
+    role: printer?.role || "front",
+  };
+
+  if (dispatchMode === "agent") {
+    if (!hasActivePrintAgent(agentChannel)) {
+      await persistPrinterPatch(printer, {
+        ...basePatch,
+        lastPrintError: "Lokal print agent ulangan emas",
+      });
+      await persistBasePrinterPatch({
+        connectionStatus: "disconnected",
+        lastPrintError: "Lokal print agent ulangan emas",
+        dispatchMode,
+        agentChannel,
+      });
+
+      return {
+        success: false,
+        connectionStatus: "disconnected",
+        via: "agent",
+        message: "Lokal print agent ulangan emas",
+        agentChannel,
+        checkedAt: now,
+        ...printerIdentity,
+      };
+    }
+
+    try {
+      const result = await dispatchPrintJob({
+        restaurantId: agentChannel,
+        job: {
+          type: "ping",
+          printer: buildPrinterPayload(settings, printer, {
+            ipAddress: ipAddress || printerSettings.ipAddress,
+            port: Number(port || printerSettings.port || 9100),
+            dispatchMode: "agent",
+            agentChannel,
+          }),
+          meta: {
+            request: "test-printer-connection",
+            initiatedAt: now.toISOString(),
+          },
+        },
+        timeoutMs: Number(timeoutMs || 7000),
+      });
+
+      await persistPrinterPatch(printer, {
+        ...basePatch,
+        connectionStatus: "connected",
+        lastPrintError: "",
+      });
+      await persistBasePrinterPatch({
+        connectionStatus: "connected",
+        lastPrintError: "",
+        dispatchMode,
+        agentChannel,
+        lastTestPrintDate: now,
+      });
+
+      return {
+        success: result?.success !== false,
+        connectionStatus: "connected",
+        via: "agent",
+        message: result?.message || "🛰️ Lokal agent onlayn",
+        agentChannel,
+        jobId: result?.jobId || null,
+        checkedAt: now,
+        ...printerIdentity,
+      };
+    } catch (error) {
+      const message = error?.message || "Lokal print agent javob bermadi";
+
+      await persistPrinterPatch(printer, {
+        ...basePatch,
+        lastPrintError: message,
+      });
+      await persistBasePrinterPatch({
+        connectionStatus: "disconnected",
+        lastPrintError: message,
+        dispatchMode,
+        agentChannel,
+      });
+
+      return {
+        success: false,
+        connectionStatus: "disconnected",
+        via: "agent",
+        message,
+        agentChannel,
+        checkedAt: now,
+        ...printerIdentity,
+      };
+    }
+  }
+
+  if (!ipAddress || !port) {
+    return {
+      success: false,
+      connectionStatus: "disconnected",
+      via: "direct",
+      message: "IP address va portni kiriting",
+      agentChannel,
+      checkedAt: now,
+      ...printerIdentity,
+      errorCode: "missing-network-config",
+    };
+  }
+
+  const pingResult = await tcpPing({ ipAddress, port, timeoutMs });
+
+  if (pingResult.success) {
+    await persistPrinterPatch(printer, {
+      connectionStatus: "connected",
+      lastConnectionTest: now,
+      lastPrintError: "",
+      dispatchMode,
+      agentChannel,
+      ipAddress,
+      port,
+    });
+
+    await persistBasePrinterPatch({
+      connectionStatus: "connected",
+      lastTestPrintDate: now,
+      ipAddress,
+      port,
+      dispatchMode,
+      agentChannel,
+      lastPrintError: "",
+    });
+
+    return {
+      success: true,
+      connectionStatus: "connected",
+      via: "direct",
+      message: "✅ Printer ulandi",
+      agentChannel,
+      ipAddress,
+      port,
+      checkedAt: now,
+      ...printerIdentity,
+    };
+  }
+
+  const errorMessage = pingResult.message || "Printer konnektsiya qilinmadi";
+
+  await persistPrinterPatch(printer, {
+    ...basePatch,
+    lastPrintError: errorMessage,
+    ipAddress,
+    port,
+  });
+  await persistBasePrinterPatch({
+    connectionStatus: "disconnected",
+    lastPrintError: errorMessage,
+    ipAddress,
+    port,
+    dispatchMode,
+    agentChannel,
+  });
+
+  return {
+    success: false,
+    connectionStatus: "disconnected",
+    via: "direct",
+    message: errorMessage,
+    agentChannel,
+    ipAddress,
+    port,
+    checkedAt: now,
+    ...printerIdentity,
+  };
+};
+
 const ensurePrinterDefaults = async (settingsDoc) => {
   if (!settingsDoc) return settingsDoc;
 
@@ -223,254 +499,130 @@ export const testPrinterConnection = async (req, res) => {
       return res.status(404).json({ success: false, message: "Printer topilmadi" });
     }
 
-    const dispatchMode = resolveDispatchMode(
-      bodyDispatchMode ?? printer?.dispatchMode ?? settings.printerSettings?.dispatchMode
-    );
+    const config = resolvePrinterConnectionConfig(settings, printer, {
+      ipAddress: bodyIp,
+      port: bodyPort,
+      dispatchMode: bodyDispatchMode,
+      agentChannel: bodyAgentChannel,
+    });
 
-    const agentChannel = resolveAgentChannel(
-      bodyAgentChannel,
-      printer?.agentChannel || settings.printerSettings?.agentChannel || settings._id?.toString() || "default"
-    );
-
-    const ipAddress = bodyIp || printer?.ipAddress || settings.printerSettings?.ipAddress;
-    const port = Number(bodyPort || printer?.port || settings.printerSettings?.port || 9100);
-
-    if (dispatchMode === "agent") {
-      if (!hasActivePrintAgent(agentChannel)) {
-        return res.status(503).json({
-          success: false,
-          message: "Lokal print agent ulangan emas",
-          connectionStatus: "disconnected",
-        });
-      }
-
-      try {
-        const result = await dispatchPrintJob({
-          restaurantId: agentChannel,
-          job: {
-            type: "ping",
-            printer: buildPrinterPayload(settings, printer, {
-              ipAddress,
-              port,
-              dispatchMode: "agent",
-              agentChannel,
-            }),
-            meta: {
-              request: "test-printer-connection",
-              initiatedAt: new Date().toISOString(),
-            },
-          },
-          timeoutMs: Number(timeoutMs || 7000),
-        });
-
-        const now = new Date();
-
-        if (printer?._id) {
-          await Settings.updateOne(
-            { "printerSettings.printers._id": printer._id },
-            {
-              $set: {
-                "printerSettings.printers.$.connectionStatus": "connected",
-                "printerSettings.printers.$.lastConnectionTest": now,
-                "printerSettings.printers.$.dispatchMode": "agent",
-                "printerSettings.printers.$.agentChannel": agentChannel,
-              },
-            }
-          );
-        }
-
-        await Settings.updateOne(
-          {},
-          {
-            $set: {
-              "printerSettings.connectionStatus": "connected",
-              "printerSettings.lastTestPrintDate": now,
-              "printerSettings.dispatchMode": "agent",
-              "printerSettings.agentChannel": agentChannel,
-            },
-          }
-        );
-
-        return res.json({
-          success: result?.success !== false,
-          message: result?.message || "🛰️ Lokal agent onlayn",
-          connectionStatus: "connected",
-          via: "agent",
-          jobId: result?.jobId || null,
-        });
-      } catch (err) {
-        const errorMessage = err?.message || "Lokal print agent javob bermadi";
-
-        if (printer?._id) {
-          await Settings.updateOne(
-            { "printerSettings.printers._id": printer._id },
-            {
-              $set: {
-                "printerSettings.printers.$.connectionStatus": "disconnected",
-                "printerSettings.printers.$.lastConnectionTest": new Date(),
-                "printerSettings.printers.$.lastPrintError": errorMessage,
-                "printerSettings.printers.$.dispatchMode": "agent",
-                "printerSettings.printers.$.agentChannel": agentChannel,
-              },
-            }
-          );
-        }
-
-        await Settings.updateOne(
-          {},
-          {
-            $set: {
-              "printerSettings.connectionStatus": "disconnected",
-              "printerSettings.lastPrintError": errorMessage,
-              "printerSettings.dispatchMode": "agent",
-              "printerSettings.agentChannel": agentChannel,
-            },
-          }
-        );
-
-        return res.status(503).json({
-          success: false,
-          message: errorMessage,
-          connectionStatus: "disconnected",
-        });
-      }
-    }
-
-    if (!ipAddress || !port) {
+    if (config.dispatchMode !== "agent" && (!config.ipAddress || !config.port)) {
       return res.status(400).json({
         success: false,
         message: "IP address va portni kiriting",
         connectionStatus: "disconnected",
+        via: config.dispatchMode,
       });
     }
 
-    const socket = new net.Socket();
-    socket.setTimeout(Number(timeoutMs || 5000));
-
-    socket.once("connect", async () => {
-      socket.destroy();
-      const now = new Date();
-
-      if (printer?._id) {
-        await Settings.updateOne(
-          { "printerSettings.printers._id": printer._id },
-          {
-            $set: {
-              "printerSettings.printers.$.connectionStatus": "connected",
-              "printerSettings.printers.$.lastConnectionTest": now,
-              "printerSettings.printers.$.ipAddress": ipAddress,
-              "printerSettings.printers.$.port": port,
-              "printerSettings.printers.$.dispatchMode": dispatchMode,
-              "printerSettings.printers.$.agentChannel": agentChannel,
-            },
-          }
-        );
-      }
-
-      await Settings.updateOne(
-        {},
-        {
-          $set: {
-            "printerSettings.connectionStatus": "connected",
-            "printerSettings.lastTestPrintDate": now,
-            "printerSettings.ipAddress": ipAddress,
-            "printerSettings.port": port,
-            "printerSettings.dispatchMode": dispatchMode,
-            "printerSettings.agentChannel": agentChannel,
-          },
-        }
-      );
-
-      res.json({
-        success: true,
-        message: "✅ Printer ulandi",
-        connectionStatus: "connected",
-        via: dispatchMode,
-      });
+    const result = await executePrinterConnectionTest({
+      settings,
+      printer,
+      config,
+      timeoutMs,
     });
 
-    socket.once("timeout", async () => {
-      socket.destroy();
-      if (printer?._id) {
-        await Settings.updateOne(
-          { "printerSettings.printers._id": printer._id },
-          {
-            $set: {
-              "printerSettings.printers.$.connectionStatus": "disconnected",
-              "printerSettings.printers.$.lastConnectionTest": new Date(),
-              "printerSettings.printers.$.dispatchMode": dispatchMode,
-              "printerSettings.printers.$.agentChannel": agentChannel,
-            },
-          }
-        );
-      }
+    const statusCode = result.success
+      ? 200
+      : result.errorCode === "missing-network-config"
+      ? 400
+      : result.via === "direct"
+      ? 400
+      : 503;
 
-      await Settings.updateOne(
-        {},
-        {
-          $set: {
-            "printerSettings.connectionStatus": "disconnected",
-            "printerSettings.lastPrintError": "Printer javob bermadi (timeout)",
-            "printerSettings.dispatchMode": dispatchMode,
-            "printerSettings.agentChannel": agentChannel,
-          },
-        }
-      );
-
-      res.status(400).json({
-        success: false,
-        message: "⏱️ Ulanish vaqti tugadi. IP addressni tekshiring",
-        connectionStatus: "disconnected",
-        via: dispatchMode,
-      });
+    return res.status(statusCode).json({
+      success: result.success,
+      message: result.message,
+      connectionStatus: result.connectionStatus,
+      via: result.via,
+      agentChannel: result.agentChannel,
+      jobId: result.jobId ?? null,
+      printerId: result.printerId ?? null,
+      ipAddress: result.ipAddress ?? null,
+      port: result.port ?? null,
+      checkedAt: result.checkedAt,
     });
-
-    socket.once("error", async (err) => {
-      socket.destroy();
-      const errorMessage = err?.message || "Ulanib bo'lmadi";
-
-      if (printer?._id) {
-        await Settings.updateOne(
-          { "printerSettings.printers._id": printer._id },
-          {
-            $set: {
-              "printerSettings.printers.$.connectionStatus": "disconnected",
-              "printerSettings.printers.$.lastConnectionTest": new Date(),
-              "printerSettings.printers.$.lastPrintError": errorMessage,
-              "printerSettings.printers.$.dispatchMode": dispatchMode,
-              "printerSettings.printers.$.agentChannel": agentChannel,
-            },
-          }
-        );
-      }
-
-      await Settings.updateOne(
-        {},
-        {
-          $set: {
-            "printerSettings.connectionStatus": "disconnected",
-            "printerSettings.lastPrintError": errorMessage,
-            "printerSettings.dispatchMode": dispatchMode,
-            "printerSettings.agentChannel": agentChannel,
-          },
-        }
-      );
-
-      res.status(400).json({
-        success: false,
-        message: `❌ Ulanib bo'lmadi: ${errorMessage}`,
-        connectionStatus: "disconnected",
-        via: dispatchMode,
-      });
-    });
-
-    socket.connect(port, ipAddress);
   } catch (err) {
     console.error("[PRINTER TEST] Error:", err);
     res.status(500).json({
       success: false,
       message: err?.message || "Server xatosi",
       connectionStatus: "disconnected",
+    });
+  }
+};
+
+export const refreshPrintersStatus = async (req, res) => {
+  try {
+    const { timeoutMs } = req.body || {};
+
+    const settings = await Settings.findOne();
+    if (!settings) {
+      return res.status(404).json({ success: false, message: "Sozlamalar topilmadi" });
+    }
+
+    await ensurePrinterDefaults(settings);
+
+    const printers = settings.printerSettings?.printers || [];
+    if (!printers.length) {
+      return res.json({
+        success: true,
+        printers: [],
+        summary: {
+          total: 0,
+          connected: 0,
+          disconnected: 0,
+          failed: 0,
+          lastCheckedAt: null,
+        },
+      });
+    }
+
+    const results = [];
+    for (const printer of printers) {
+      const config = resolvePrinterConnectionConfig(settings, printer, {});
+      const outcome = await executePrinterConnectionTest({
+        settings,
+        printer,
+        config,
+        timeoutMs,
+      });
+
+      results.push({
+        printerId: outcome.printerId ?? printer?._id?.toString() ?? null,
+        name: printer?.name || outcome.name || "Printer",
+        role: printer?.role || outcome.role || null,
+        connectionStatus: outcome.connectionStatus,
+        success: outcome.success,
+        message: outcome.message,
+        via: outcome.via,
+        agentChannel: outcome.agentChannel,
+        ipAddress: outcome.ipAddress ?? config.ipAddress ?? null,
+        port: outcome.port ?? config.port ?? null,
+        checkedAt: outcome.checkedAt,
+        errorCode: outcome.errorCode ?? null,
+      });
+    }
+
+    const summary = {
+      total: results.length,
+      connected: results.filter((item) => item.connectionStatus === "connected").length,
+    };
+    summary.disconnected = summary.total - summary.connected;
+    summary.failed = results.filter((item) => item.success === false).length;
+    summary.lastCheckedAt = results.reduce((latest, item) => {
+      if (!item.checkedAt) return latest;
+      const current = new Date(item.checkedAt).getTime();
+      if (!latest) return item.checkedAt;
+      return current > new Date(latest).getTime() ? item.checkedAt : latest;
+    }, null);
+
+    return res.json({ success: true, printers: results, summary });
+  } catch (error) {
+    console.error("[PRINTER REFRESH] Error:", error);
+    return res.status(500).json({
+      success: false,
+      message: error?.message || "Printerlar holatini yangilashda xatolik",
     });
   }
 };
