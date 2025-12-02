@@ -1,7 +1,9 @@
 import TelegramBot from "node-telegram-bot-api";
 import axios from "axios";
 import mongoose from "mongoose";
+import bcrypt from "bcryptjs";
 import User from "../models/User.js";
+import { resetPosDataLocal } from "./systemMaintenance.js";
 import {
   buildSalesReport,
   resolveDateRange,
@@ -270,6 +272,9 @@ const buildMainMenuKeyboard = () => ({
       { text: "🗓️ Custom davr", callback_data: "report:custom" },
     ],
     [
+      { text: "➕ Yangi egani qo'shish", callback_data: "owner:new" },
+    ],
+    [
       { text: "🚪 Chiqish", callback_data: "logout" },
     ],
   ],
@@ -376,6 +381,365 @@ const handleSuccessfulLogin = async (bot, chatId, user, options = {}) => {
   return sendMainMenu(bot, chatId, user.name, {
     text: `✅ Xush kelibsiz, ${user.name}!\nQuyidagi tugmalardan kerakli hisobotni tanlang.`,
   });
+};
+
+const OWNER_STATES = {
+  NAME: "register_owner_name",
+  USERNAME: "register_owner_username",
+  PASSWORD: "register_owner_password",
+  PIN: "register_owner_pin",
+};
+
+const generateStrongPassword = (length = 10) => {
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$";
+  let result = "";
+  for (let i = 0; i < length; i += 1) {
+    result += alphabet[Math.floor(Math.random() * alphabet.length)];
+  }
+  return result;
+};
+
+const sanitizeUsernameInput = (value = "") => value.trim().toLowerCase().replace(/\s+/g, "");
+
+const generateUniqueUsernameLocal = async (name) => {
+  let base = sanitizeUsernameInput(name).replace(/[^a-z0-9]/g, "");
+  if (!base) {
+    base = `user${Date.now()}`;
+  }
+  let candidate = base;
+  let counter = 1;
+  while (await User.findOne({ username: candidate })) {
+    candidate = `${base}${counter}`;
+    counter += 1;
+  }
+  return candidate;
+};
+
+const sendOwnerPrompt = async (bot, chatId, text) => {
+  const session = getSession(chatId);
+  const previous = session?.ownerPromptMessageId;
+  if (previous) {
+    await deleteMessageSilently(bot, chatId, previous);
+  }
+  const sent = await bot.sendMessage(chatId, text, {
+    reply_markup: buildCancelMarkup("owner"),
+  });
+  updateSession(chatId, { ownerPromptMessageId: sent.message_id });
+  return sent;
+};
+
+const startOwnerRegistrationFlow = async (bot, chatId) => {
+  updateSession(chatId, {
+    state: OWNER_STATES.NAME,
+    newOwnerDraft: {},
+  });
+
+  const introText = "🆕 Restoran egasini ro'yxatdan o'tkazamiz.\n\n1️⃣ Iltimos, egasi yoki bosh adminning to'liq ismini yuboring.\n\nBekor qilish uchun /cancel yoki \"Bekor qilish\" tugmasini bosing.";
+  await sendOwnerPrompt(bot, chatId, introText);
+};
+
+const createOwnerAccount = async ({ name, username, password, pinCode, apiToken }) => {
+  if (!name || !password || !pinCode) {
+    return { ok: false, message: "Majburiy maydonlar to'liq emas." };
+  }
+
+  if (usingApiData) {
+    if (!apiClient || !backendApiUrl) {
+      return { ok: false, message: "Backend API sozlanmagan." };
+    }
+
+    try {
+      const payload = { name, role: "admin", pinCode, password };
+      if (username) {
+        payload.username = username;
+      }
+      const headers = apiToken ? { Authorization: `Bearer ${apiToken}` } : undefined;
+      const response = await apiClient.post("/api/auth/register", payload, { headers });
+      const data = response.data || {};
+      return {
+        ok: true,
+        username: data.username || username,
+        id: data.id,
+        role: data.role || "admin",
+      };
+    } catch (error) {
+      const statusMessage = error?.response?.data?.message || error.message;
+      const lower = statusMessage ? statusMessage.toLowerCase() : "";
+      const duplicate = lower.includes("username") && lower.includes("exist");
+      return {
+        ok: false,
+        message: statusMessage,
+        code: duplicate ? "USERNAME_EXISTS" : undefined,
+      };
+    }
+  }
+
+  if (!isMongoReady()) {
+    return { ok: false, message: "Ma'lumotlar bazasi ulanmagan." };
+  }
+
+  let finalUsername = username;
+  if (finalUsername) {
+    const exists = await User.findOne({ username: finalUsername });
+    if (exists) {
+      return { ok: false, message: "Bu login band.", code: "USERNAME_EXISTS" };
+    }
+  } else {
+    finalUsername = await generateUniqueUsernameLocal(name);
+  }
+
+  try {
+    const passwordHash = await bcrypt.hash(password, 10);
+    const pinHash = await bcrypt.hash(pinCode, 10);
+    const user = await User.create({
+      name,
+      username: finalUsername,
+      passwordHash,
+      pinHash,
+      role: "admin",
+    });
+    return { ok: true, username: user.username, id: user._id ? user._id.toString() : undefined, role: user.role };
+  } catch (error) {
+    const message = error?.message || "Foydalanuvchini yaratib bo'lmadi.";
+    const lower = message.toLowerCase();
+    const duplicate = lower.includes("duplicate key") || (lower.includes("duplicate") && lower.includes("username"));
+    return {
+      ok: false,
+      message: duplicate ? "Bu login band." : message,
+      code: duplicate ? "USERNAME_EXISTS" : undefined,
+    };
+  }
+};
+
+const buildOwnerSummaryMessage = ({
+  name,
+  username,
+  password,
+  pinCode,
+  passwordGenerated,
+  resetSucceeded,
+  resetMessage,
+}) => {
+  const lines = [
+    "✅ Restoran egasi muvaffaqiyatli qo'shildi!",
+    "",
+    `👤 Ism: ${name}`,
+    `👥 Login: ${username}`,
+    `🔑 Parol${passwordGenerated ? " (avtomatik)" : ""}: ${password}`,
+    `📌 PIN-kod: ${pinCode}`,
+    "",
+    resetSucceeded
+      ? "🧹 Barcha eski POS ma'lumotlari tozalandi."
+      : `⚠️ Ma'lumotlarni tozalashda muammo: ${resetMessage || "noma'lum xato"}`,
+    "⚠️ Ushbu ma'lumotlarni egasiga xavfsiz tarzda yetkazib bering.",
+  ];
+
+  return lines.join("\n");
+};
+
+const requestSystemResetRemote = async ({ keepUserId, apiToken }) => {
+  if (!apiClient || !backendApiUrl) {
+    return { ok: false, message: "Backend API sozlanmagan." };
+  }
+  if (!apiToken) {
+    return { ok: false, message: "API token mavjud emas." };
+  }
+
+  try {
+    const headers = { Authorization: `Bearer ${apiToken}` };
+    await apiClient.post("/api/system/reset", { keepUserId }, { headers });
+    return { ok: true };
+  } catch (error) {
+    const message = error?.response?.data?.message || error.message;
+    return { ok: false, message };
+  }
+};
+
+const performSystemReset = async ({ keepUserId, apiToken }) => {
+  if (usingApiData) {
+    return requestSystemResetRemote({ keepUserId, apiToken });
+  }
+
+  if (!isMongoReady()) {
+    return { ok: false, message: "Ma'lumotlar bazasi ulanmagan." };
+  }
+
+  return resetPosDataLocal({ keepUserId });
+};
+
+const handleOwnerFlowMessage = async (bot, chatId, session, text) => {
+  const trimmed = text.trim();
+  const draft = session.newOwnerDraft || {};
+
+  if (session.state === OWNER_STATES.NAME) {
+    if (trimmed.length < 3) {
+      await bot.sendMessage(chatId, "❗️ Ism juda qisqa. Iltimos, to'liq ismini yuboring.");
+      await sendOwnerPrompt(bot, chatId, "👤 Restoran egasining to'liq ismini kiriting.");
+      return;
+    }
+    const nextDraft = { ...draft, name: trimmed };
+    updateSession(chatId, { newOwnerDraft: nextDraft, state: OWNER_STATES.USERNAME });
+    await sendOwnerPrompt(
+      bot,
+      chatId,
+      "✍️ Endi login kiriting.\n• Masalan: restoranjon\n• Avtomatik yaratish uchun \"auto\" deb yozing."
+    );
+    return;
+  }
+
+  if (session.state === OWNER_STATES.USERNAME) {
+    if (!trimmed) {
+      await bot.sendMessage(chatId, "❗️ Login bo'sh bo'lishi mumkin emas.");
+      await sendOwnerPrompt(
+        bot,
+        chatId,
+        "✍️ Login kiriting yoki \"auto\" deb yozing (bo'sh joylarsiz, faqat lotin harflari)."
+      );
+      return;
+    }
+
+    const lower = trimmed.toLowerCase();
+    const nextDraft = { ...draft };
+    if (lower === "auto" || trimmed === "-") {
+      nextDraft.username = null;
+      nextDraft.usernameAuto = true;
+    } else {
+      const sanitized = sanitizeUsernameInput(trimmed).replace(/[^a-z0-9._-]/g, "");
+      if (sanitized.length < 3) {
+        await bot.sendMessage(chatId, "❗️ Login kamida 3 ta lotin harfidan iborat bo'lsin.");
+        await sendOwnerPrompt(
+          bot,
+          chatId,
+          "✍️ Login kiriting (faqat lotin harflari, raqam va _ . - belgilariga ruxsat beriladi) yoki \"auto\" deb yozing."
+        );
+        return;
+      }
+      if (/[A-Z]/.test(trimmed)) {
+        await bot.sendMessage(chatId, `ℹ️ Login kichik harflarga o'zgartirildi: ${sanitized}`);
+      }
+      nextDraft.username = sanitized;
+      nextDraft.usernameAuto = false;
+    }
+
+    updateSession(chatId, { newOwnerDraft: nextDraft, state: OWNER_STATES.PASSWORD });
+    await sendOwnerPrompt(
+      bot,
+      chatId,
+      "🔑 Parolni kiriting (kamida 6 belgi).\n• Xavfsiz parol yaratish uchun \"auto\" deb yozing."
+    );
+    return;
+  }
+
+  if (session.state === OWNER_STATES.PASSWORD) {
+    let password = trimmed;
+    let generated = false;
+    if (!password || password.toLowerCase() === "auto" || password === "-") {
+      password = generateStrongPassword();
+      generated = true;
+      await bot.sendMessage(chatId, `🔐 Avtomatik yaratilgan parol: ${password}`);
+    } else {
+      if (password.length < 6) {
+        await bot.sendMessage(chatId, "❗️ Parol kamida 6 belgi bo'lishi kerak.");
+        await sendOwnerPrompt(
+          bot,
+          chatId,
+          "🔑 Yangi parol kiriting (kamida 6 belgi) yoki \"auto\" deb yozing."
+        );
+        return;
+      }
+      if (/\s/.test(password)) {
+        await bot.sendMessage(chatId, "❗️ Parolda bo'sh joy bo'lmasligi kerak.");
+        await sendOwnerPrompt(
+          bot,
+          chatId,
+          "🔑 Yangi parol kiriting (bo'sh joysiz) yoki \"auto\" deb yozing."
+        );
+        return;
+      }
+    }
+
+    const nextDraft = { ...draft, password, passwordGenerated: generated };
+    updateSession(chatId, { newOwnerDraft: nextDraft, state: OWNER_STATES.PIN });
+    await sendOwnerPrompt(
+      bot,
+      chatId,
+      "📌 Endi 4 xonali PIN-kodni yuboring (faqat raqam)."
+    );
+    return;
+  }
+
+  if (session.state === OWNER_STATES.PIN) {
+    const pinCode = trimmed.replace(/\s+/g, "");
+    if (!/^\d{4}$/.test(pinCode)) {
+      await bot.sendMessage(chatId, "❗️ PIN 4 ta raqamdan iborat bo'lishi kerak.");
+      await sendOwnerPrompt(bot, chatId, "📌 4 xonali PIN-kodni qaytadan yuboring.");
+      return;
+    }
+
+    const registrationDraft = { ...draft, pinCode };
+    const loading = await bot.sendMessage(chatId, "⏳ Yangi foydalanuvchi ro'yxatdan o'tkazilmoqda, iltimos kuting...");
+
+    const result = await createOwnerAccount({
+      name: registrationDraft.name,
+      username: registrationDraft.username,
+      password: registrationDraft.password,
+      pinCode,
+      apiToken: session?.apiToken,
+    });
+
+    if (loading?.message_id) {
+      await deleteMessageSilently(bot, chatId, loading.message_id);
+    }
+
+    if (!result.ok) {
+      const errorMessage = result.message || "Foydalanuvchini yaratib bo'lmadi.";
+      await bot.sendMessage(chatId, `❌ ${errorMessage}`);
+
+      if (result.code === "USERNAME_EXISTS") {
+        const nextDraft = { ...draft, username: undefined };
+        updateSession(chatId, { newOwnerDraft: nextDraft, state: OWNER_STATES.USERNAME });
+        await sendOwnerPrompt(
+          bot,
+          chatId,
+          "🔁 Bu login band. Boshqa login kiriting yoki \"auto\" deb yozing."
+        );
+      } else {
+        updateSession(chatId, { newOwnerDraft: { ...draft }, state: OWNER_STATES.PIN });
+        await sendOwnerPrompt(bot, chatId, "📌 Iltimos, PIN-kodni qaytadan yuboring.");
+      }
+      return;
+    }
+
+    const resetResult = result.id
+      ? await performSystemReset({
+          keepUserId: result.id,
+          apiToken: session?.apiToken,
+        })
+      : { ok: false, message: "Yangi foydalanuvchi identifikatori aniqlanmadi." };
+
+    const sessionBeforeCleanup = getSession(chatId);
+    if (sessionBeforeCleanup?.ownerPromptMessageId) {
+      await deleteMessageSilently(bot, chatId, sessionBeforeCleanup.ownerPromptMessageId);
+    }
+
+    const finalUsername = result.username || registrationDraft.username;
+    const summary = buildOwnerSummaryMessage({
+      name: registrationDraft.name,
+      username: finalUsername,
+      password: registrationDraft.password,
+      pinCode,
+      passwordGenerated: Boolean(registrationDraft.passwordGenerated),
+      resetSucceeded: Boolean(resetResult?.ok),
+      resetMessage: resetResult?.message,
+    });
+
+    await bot.sendMessage(chatId, summary);
+
+    destroySession(chatId);
+    await showLoginIntro(bot, chatId, {
+      message: "🔄 Barcha eski ma'lumotlar tozalandi. Yangi login va parol bilan tizimga qayta kiring.",
+    });
+  }
 };
 
 const validateAdminCredentials = async (username, password) => {
@@ -574,9 +938,18 @@ const resetFlowState = async (bot, chatId) => {
   if (session.customPromptMessageId) {
     await deleteMessageSilently(bot, chatId, session.customPromptMessageId);
   }
+  if (session.ownerPromptMessageId) {
+    await deleteMessageSilently(bot, chatId, session.ownerPromptMessageId);
+  }
 
   if (session.userId) {
-    updateSession(chatId, { state: "authenticated", loginPromptMessageId: undefined, customPromptMessageId: undefined });
+    updateSession(chatId, {
+      state: "authenticated",
+      loginPromptMessageId: undefined,
+      customPromptMessageId: undefined,
+      ownerPromptMessageId: undefined,
+      newOwnerDraft: undefined,
+    });
   } else {
     destroySession(chatId);
   }
@@ -878,6 +1251,9 @@ export const initTelegramBot = (options = {}) => {
     if (session?.customPromptMessageId) {
       await deleteMessageSilently(bot, chatId, session.customPromptMessageId);
     }
+    if (session?.ownerPromptMessageId) {
+      await deleteMessageSilently(bot, chatId, session.ownerPromptMessageId);
+    }
 
     destroySession(chatId);
     await showLoginIntro(bot, chatId, {
@@ -924,6 +1300,29 @@ export const initTelegramBot = (options = {}) => {
     } else {
       await introduceBot(bot, chatId);
     }
+  });
+
+  bot.onText(/^\/(owner|newowner|registerowner)$/i, async (msg) => {
+    if (!(await shouldHandleCommandMessage(msg))) {
+      return;
+    }
+    const chatId = msg.chat.id;
+    const session = getSession(chatId);
+    if (!session?.userId) {
+      await sendUnauthorized(bot, chatId);
+      return;
+    }
+    if (session.role !== "admin") {
+      await bot.sendMessage(chatId, "🚫 Ushbu amal faqat admin foydalanuvchilar uchun mavjud.");
+      return;
+    }
+
+    if (session.menuMessageId) {
+      await deleteMessageSilently(bot, chatId, session.menuMessageId);
+      updateSession(chatId, { menuMessageId: undefined });
+    }
+
+    await startOwnerRegistrationFlow(bot, chatId);
   });
 
   bot.onText(/^\/cancel$/i, async (msg) => {
@@ -1004,6 +1403,18 @@ export const initTelegramBot = (options = {}) => {
       return;
     }
 
+    if (data === "cancel:owner") {
+      await bot.answerCallbackQuery(id, { text: "Bekor qilindi." }).catch(() => {});
+      await resetFlowState(bot, chatId);
+      const refreshed = getSession(chatId);
+      if (refreshed?.userId) {
+        await sendMainMenu(bot, chatId, refreshed.name || refreshed.username);
+      } else {
+        await showLoginIntro(bot, chatId, { message: "❌ Amal bekor qilindi." });
+      }
+      return;
+    }
+
     if (data === "logout") {
       await bot.answerCallbackQuery(id, { text: "Chiqdingiz." }).catch(() => {});
       const sessionForLogout = getSession(chatId);
@@ -1016,10 +1427,38 @@ export const initTelegramBot = (options = {}) => {
       if (sessionForLogout?.customPromptMessageId) {
         await deleteMessageSilently(bot, chatId, sessionForLogout.customPromptMessageId);
       }
+      if (sessionForLogout?.ownerPromptMessageId) {
+        await deleteMessageSilently(bot, chatId, sessionForLogout.ownerPromptMessageId);
+      }
       destroySession(chatId);
       await showLoginIntro(bot, chatId, {
         message: "🚪 Profilingizdan chiqdingiz. Qayta kirish uchun \"Tizimga kirish\" tugmasidan foydalaning.",
       });
+      return;
+    }
+
+    if (data === "owner:new") {
+      if (!session?.userId) {
+        await bot.answerCallbackQuery(id, {
+          text: "Avval tizimga kiring.",
+          show_alert: true,
+        }).catch(() => {});
+        return;
+      }
+      if (session.role !== "admin") {
+        await bot.answerCallbackQuery(id, {
+          text: "Ushbu amal faqat adminlar uchun.",
+          show_alert: true,
+        }).catch(() => {});
+        return;
+      }
+
+      await bot.answerCallbackQuery(id).catch(() => {});
+      if (session.menuMessageId) {
+        await deleteMessageSilently(bot, chatId, session.menuMessageId);
+        updateSession(chatId, { menuMessageId: undefined });
+      }
+      await startOwnerRegistrationFlow(bot, chatId);
       return;
     }
 
@@ -1079,6 +1518,11 @@ export const initTelegramBot = (options = {}) => {
       } else {
         await showLoginIntro(bot, chatId, { message: "❌ Amal bekor qilindi." });
       }
+      return;
+    }
+
+    if (session.state && session.state.startsWith("register_owner")) {
+      await handleOwnerFlowMessage(bot, chatId, session, text);
       return;
     }
 

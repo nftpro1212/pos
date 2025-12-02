@@ -21,6 +21,7 @@ import uploadRoutes from "./routes/uploadRoutes.js";
 import shiftRoutes from "./routes/shiftRoutes.js";
 import tipRoutes from "./routes/tipRoutes.js";
 import agentRoutes from "./routes/agentRoutes.js";
+import systemRoutes from "./routes/systemRoutes.js";
 import path from "path";
 import { initSocket } from "./socket.js";
 import { initTelegramBot } from "./services/telegramBot.js";
@@ -85,6 +86,7 @@ app.use("/api/upload", uploadRoutes);
 app.use("/api/shifts", shiftRoutes);
 app.use("/api/tips", tipRoutes);
 app.use("/api/agent", agentRoutes);
+app.use("/api/system", systemRoutes);
 app.use("/api/uploads", express.static(path.resolve("uploads")));
 
 // Simple index
