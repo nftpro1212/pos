@@ -6,6 +6,7 @@ const { Schema } = mongoose;
 const inventoryStockSchema = new Schema(
   {
     item: { type: Schema.Types.ObjectId, ref: "InventoryItem", required: true },
+    restaurant: { type: Schema.Types.ObjectId, ref: "Restaurant", index: true },
     warehouse: { type: Schema.Types.ObjectId, ref: "Warehouse", required: true },
     quantity: { type: Number, default: 0, min: 0 },
     unit: { type: String, trim: true, default: "dona" },
@@ -19,7 +20,7 @@ const inventoryStockSchema = new Schema(
   { timestamps: true }
 );
 
-inventoryStockSchema.index({ item: 1, warehouse: 1 }, { unique: true });
+inventoryStockSchema.index({ restaurant: 1, item: 1, warehouse: 1 }, { unique: true });
 inventoryStockSchema.index({ warehouse: 1 });
 inventoryStockSchema.index({ quantity: 1 });
 

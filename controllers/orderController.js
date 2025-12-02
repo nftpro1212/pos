@@ -23,8 +23,22 @@ import {
   generateEscPosReceipt,
 } from "../utils/printer.js";
 import { dispatchPrintJob, hasActivePrintAgent } from "../socket.js";
+import { ensureRestaurantId, resolveRestaurantId } from "../utils/tenant.js";
 
 const { Types } = mongoose;
+
+const buildSettingsFilter = (settings, restaurantId) => {
+  if (settings?._id) {
+    return { _id: settings._id };
+  }
+  if (settings?.restaurant) {
+    return { restaurant: settings.restaurant };
+  }
+  if (restaurantId) {
+    return { restaurant: restaurantId };
+  }
+  return null;
+};
 
 const resolveDispatchMode = (value, fallback = "direct") => {
   const allowed = new Set(["direct", "agent"]);
@@ -66,13 +80,24 @@ const applyRecipeInventoryUsage = async (order, user) => {
   try {
     if (!order?.items?.length) return;
 
+    const restaurantId = order?.restaurant ? order.restaurant.toString() : null;
+
+    const recipeFilter = {
+      menuItem: { $in: [] },
+    };
+
     const validMenuItems = order.items
       .map((item) => (Types.ObjectId.isValid(item.menuItem) ? item.menuItem : null))
       .filter(Boolean);
 
     if (!validMenuItems.length) return;
 
-    const recipes = await Recipe.find({ menuItem: { $in: validMenuItems }, isActive: true })
+    recipeFilter.menuItem.$in = validMenuItems;
+    if (restaurantId) {
+      recipeFilter.restaurant = restaurantId;
+    }
+
+    const recipes = await Recipe.find({ ...recipeFilter, isActive: true })
       .lean();
     if (!recipes.length) return;
 
@@ -94,7 +119,12 @@ const applyRecipeInventoryUsage = async (order, user) => {
     if (!ingredientIdSet.size) return;
 
     const ingredientIds = Array.from(ingredientIdSet).map((id) => new Types.ObjectId(id));
-    const inventoryItems = await InventoryItem.find({ _id: { $in: ingredientIds } })
+    const itemFilter = { _id: { $in: ingredientIds } };
+    if (restaurantId) {
+      itemFilter.restaurant = restaurantId;
+    }
+
+    const inventoryItems = await InventoryItem.find(itemFilter)
       .select("_id name unit cost defaultWarehouse parLevel currentStock")
       .lean();
     if (!inventoryItems.length) return;
@@ -170,7 +200,10 @@ const applyRecipeInventoryUsage = async (order, user) => {
         continue;
       }
 
-      const stockDoc = await getOrCreateStock(inventoryItem, warehouse, { parLevel: inventoryItem.parLevel });
+      const stockDoc = await getOrCreateStock(inventoryItem, warehouse, {
+        parLevel: inventoryItem.parLevel,
+        restaurantId,
+      });
       const previousQuantity = stockDoc.quantity || 0;
       const usageQuantity = usageEntry.totalQuantity;
       let newQuantity = previousQuantity - usageQuantity;
@@ -191,6 +224,7 @@ const applyRecipeInventoryUsage = async (order, user) => {
       if (movementQuantity > 0 || shortage > 0) {
         await InventoryMovement.create({
           item: inventoryItem._id,
+          restaurant: restaurantId,
           type: "usage",
           quantity: movementQuantity,
           delta: actualDelta,
@@ -222,7 +256,10 @@ const applyRecipeInventoryUsage = async (order, user) => {
 
     for (const aggregate of aggregateByInventory.values()) {
       const total = await recalcItemTotals(aggregate.inventoryItemId);
-      await InventoryItem.findByIdAndUpdate(aggregate.inventoryItemId, {
+      const updateFilter = restaurantId
+        ? { _id: aggregate.inventoryItemId, restaurant: restaurantId }
+        : { _id: aggregate.inventoryItemId };
+      await InventoryItem.findOneAndUpdate(updateFilter, {
         currentStock: total,
       });
     }
@@ -230,6 +267,7 @@ const applyRecipeInventoryUsage = async (order, user) => {
     if (aggregateByInventory.size) {
       await ActionLog.create({
         user: user?._id || null,
+        restaurant: restaurantId,
         action: "inventory_usage_auto",
         details: `Buyurtma #${order._id.toString().slice(-6)} uchun avtomatik sarf`
           + ` (${aggregateByInventory.size} ta ingredient)` ,
@@ -264,6 +302,8 @@ const triggerProductionPrints = async ({ order, settings }) => {
   const printers = Array.isArray(basePrinterSettings.printers)
     ? basePrinterSettings.printers
     : [];
+
+  const settingsFilter = buildSettingsFilter(settings, order?.restaurant || order?.restaurantId);
 
   const printerMap = new Map();
   printers.forEach((printer) => {
@@ -451,9 +491,9 @@ const triggerProductionPrints = async ({ order, settings }) => {
 
       const now = new Date();
 
-      if (printer?._id) {
+      if (printer?._id && settingsFilter) {
         await Settings.updateOne(
-          { "printerSettings.printers._id": printer._id },
+          { ...settingsFilter, "printerSettings.printers._id": printer._id },
           {
             $set: {
               "printerSettings.printers.$.lastPrintDate": now,
@@ -462,9 +502,9 @@ const triggerProductionPrints = async ({ order, settings }) => {
             },
           },
         );
-      } else {
+      } else if (settingsFilter) {
         await Settings.updateOne(
-          {},
+          settingsFilter,
           {
             $set: {
               "printerSettings.lastPrintDate": now,
@@ -484,9 +524,9 @@ const triggerProductionPrints = async ({ order, settings }) => {
     } catch (error) {
       console.error("[ORDER PRINT] Error:", error);
 
-      if (printer?._id) {
+      if (printer?._id && settingsFilter) {
         await Settings.updateOne(
-          { "printerSettings.printers._id": printer._id },
+          { ...settingsFilter, "printerSettings.printers._id": printer._id },
           {
             $set: {
               "printerSettings.printers.$.connectionStatus": "disconnected",
@@ -494,9 +534,9 @@ const triggerProductionPrints = async ({ order, settings }) => {
             },
           },
         );
-      } else {
+      } else if (settingsFilter) {
         await Settings.updateOne(
-          {},
+          settingsFilter,
           {
             $set: {
               "printerSettings.connectionStatus": "disconnected",
@@ -556,6 +596,8 @@ const triggerFrontReceiptPrint = async ({ order, settings }) => {
   const printers = Array.isArray(basePrinterSettings.printers)
     ? basePrinterSettings.printers
     : [];
+
+  const settingsFilter = buildSettingsFilter(settings, order?.restaurant || order?.restaurantId);
 
   const networkCapable = (printer) => {
     if (!printer) return false;
@@ -691,9 +733,9 @@ const triggerFrontReceiptPrint = async ({ order, settings }) => {
           );
         }
 
-        if (printer?._id) {
+        if (printer?._id && settingsFilter) {
           await Settings.updateOne(
-            { "printerSettings.printers._id": printer._id },
+            { ...settingsFilter, "printerSettings.printers._id": printer._id },
             {
               $set: {
                 "printerSettings.printers.$.lastPrintDate": new Date(),
@@ -702,9 +744,9 @@ const triggerFrontReceiptPrint = async ({ order, settings }) => {
               },
             },
           );
-        } else {
+        } else if (settingsFilter) {
           await Settings.updateOne(
-            {},
+            settingsFilter,
             {
               $set: {
                 "printerSettings.lastPrintDate": new Date(),
@@ -725,9 +767,9 @@ const triggerFrontReceiptPrint = async ({ order, settings }) => {
       } catch (error) {
         console.error("[ORDER RECEIPT PRINT] Error:", error);
 
-        if (printer?._id) {
+        if (printer?._id && settingsFilter) {
           await Settings.updateOne(
-            { "printerSettings.printers._id": printer._id },
+            { ...settingsFilter, "printerSettings.printers._id": printer._id },
             {
               $set: {
                 "printerSettings.printers.$.connectionStatus": "disconnected",
@@ -735,9 +777,9 @@ const triggerFrontReceiptPrint = async ({ order, settings }) => {
               },
             },
           );
-        } else {
+        } else if (settingsFilter) {
           await Settings.updateOne(
-            {},
+            settingsFilter,
             {
               $set: {
                 "printerSettings.connectionStatus": "disconnected",
@@ -769,12 +811,23 @@ const triggerFrontReceiptPrint = async ({ order, settings }) => {
 };
 
 export const createOrder = async (req, res) => {
+  let restaurantId;
   try {
-    const payload = req.body;
+    restaurantId = ensureRestaurantId(req, { allowBody: true, allowQuery: true });
+  } catch (error) {
+    return res.status(error.statusCode || 400).json({ message: error.message });
+  }
+
+  try {
+    const payload = { ...req.body };
+    delete payload.restaurant;
+    delete payload.restaurantId;
+    delete payload.tenantId;
     let targetTable = null;
 
     if (payload.tableId) {
-      targetTable = await Table.findById(payload.tableId).select("assignedTo status");
+      targetTable = await Table.findOne({ _id: payload.tableId, restaurant: restaurantId })
+        .select("assignedTo status");
 
       if (!targetTable) {
         return res.status(404).json({ message: "Stol topilmadi" });
@@ -792,14 +845,14 @@ export const createOrder = async (req, res) => {
       }
     }
 
-    const systemSettings = (await Settings.findOne()) || {};
+    const systemSettings = (await Settings.findOne({ restaurant: restaurantId })) || {};
     const taxSettings = systemSettings.taxSettings || {};
     const taxIntegration = systemSettings.taxIntegration || {};
     const taxRate = resolveTaxRate(
       [taxSettings.serviceCharge, taxSettings.taxRate],
       0.12,
     );
-    const discountValue = payload.discount || 0;
+    const discountValue = Number(payload.discount || 0) || 0;
     const incomingItems = Array.isArray(payload.items) ? payload.items : [];
     const menuItemIds = Array.from(
       new Set(
@@ -810,12 +863,17 @@ export const createOrder = async (req, res) => {
     );
 
     const menuDocs = menuItemIds.length
-      ? await MenuItem.find({ _id: { $in: menuItemIds } })
+      ? await MenuItem.find({ _id: { $in: menuItemIds }, restaurant: restaurantId })
           .select("_id name price productionPrinterIds productionTags category")
           .lean()
       : [];
 
     const menuMap = new Map(menuDocs.map((doc) => [doc._id.toString(), doc]));
+
+    const missingMenuId = incomingItems.find((item) => item?.menuItem && !menuMap.has(item.menuItem.toString()));
+    if (missingMenuId) {
+      return res.status(400).json({ message: "Menu topilmadi" });
+    }
 
     const items = incomingItems.map((item) => {
       const menuDoc = item?.menuItem ? menuMap.get(item.menuItem.toString()) : null;
@@ -863,7 +921,7 @@ export const createOrder = async (req, res) => {
       total,
       fiscalStatus: initialFiscalStatus,
       createdBy: req.user._id,
-      restaurantId: payload.restaurantId || "default",
+      restaurant: restaurantId,
       isDelivery: payload.isDelivery || false,
       deliveryCourier: payload.deliveryCourier || null,
       customer: payload.customer || null
@@ -879,7 +937,11 @@ export const createOrder = async (req, res) => {
         tableUpdate.assignedAt = new Date();
       }
 
-      await Table.findByIdAndUpdate(payload.tableId, tableUpdate);
+      await Table.findOneAndUpdate(
+        { _id: payload.tableId, restaurant: restaurantId },
+        tableUpdate,
+        { new: false }
+      );
     }
 
     if (taxIntegration?.enabled && taxIntegration.autoFiscalize !== false) {
@@ -908,7 +970,11 @@ export const createOrder = async (req, res) => {
     }
 
     // emit to socket (if any)
-    if (req.app.get("io")) req.app.get("io").to(order.restaurantId).emit("order:new", order);
+    const io = req.app.get("io");
+    if (io) {
+      const room = restaurantId ? restaurantId.toString() : "default";
+      io.to(room).emit("order:new", order);
+    }
 
     res.json(order);
   } catch (err) {
@@ -917,7 +983,12 @@ export const createOrder = async (req, res) => {
 };
 
 export const listOrders = async (req, res) => {
-  const filter = {};
+  const restaurantId = resolveRestaurantId(req, { allowQuery: true });
+  if (!restaurantId) {
+    return res.status(400).json({ message: "Restoran aniqlanmadi" });
+  }
+
+  const filter = { restaurant: restaurantId };
 
   const { deliveryOnly, isDelivery, tableId } = req.query;
 
@@ -935,7 +1006,7 @@ export const listOrders = async (req, res) => {
     filter.table = new Types.ObjectId(tableId);
 
     if (req.user?.role === "ofitsiant") {
-      const table = await Table.findById(tableId).select("assignedTo assignedToName");
+      const table = await Table.findOne({ _id: tableId, restaurant: restaurantId }).select("assignedTo assignedToName");
       if (table) {
         const assignedId = table.assignedTo ? table.assignedTo.toString() : null;
         const userId = req.user?._id ? req.user._id.toString() : null;
@@ -957,17 +1028,58 @@ export const listOrders = async (req, res) => {
 };
 
 export const getOrder = async (req, res) => {
-  const order = await Order.findById(req.params.id).populate("items.menuItem");
+  const restaurantId = resolveRestaurantId(req, { allowQuery: true });
+  if (!restaurantId) {
+    return res.status(400).json({ message: "Restoran aniqlanmadi" });
+  }
+
+  const order = await Order.findOne({ _id: req.params.id, restaurant: restaurantId })
+    .populate("items.menuItem");
+  if (!order) {
+    return res.status(404).json({ message: "Buyurtma topilmadi" });
+  }
   res.json(order);
 };
 
 export const updateOrder = async (req, res) => {
-  const order = await Order.findByIdAndUpdate(req.params.id, req.body, { new: true });
-  if (req.app.get("io")) req.app.get("io").to(order.restaurantId).emit("order:updated", order);
+  const restaurantId = resolveRestaurantId(req, { allowBody: true, allowQuery: true });
+  if (!restaurantId) {
+    return res.status(400).json({ message: "Restoran aniqlanmadi" });
+  }
+
+  const payload = { ...req.body };
+  delete payload.restaurant;
+  delete payload.restaurantId;
+  delete payload.tenantId;
+
+  const order = await Order.findOneAndUpdate(
+    { _id: req.params.id, restaurant: restaurantId },
+    payload,
+    { new: true }
+  );
+
+  if (!order) {
+    return res.status(404).json({ message: "Buyurtma topilmadi" });
+  }
+
+  const io = req.app.get("io");
+  if (io) {
+    const room = restaurantId ? restaurantId.toString() : "default";
+    io.to(room).emit("order:updated", order);
+  }
+
   res.json(order);
 };
 
 export const deleteOrder = async (req, res) => {
-  await Order.findByIdAndDelete(req.params.id);
+  const restaurantId = resolveRestaurantId(req, { allowQuery: true, allowBody: true });
+  if (!restaurantId) {
+    return res.status(400).json({ message: "Restoran aniqlanmadi" });
+  }
+
+  const deleted = await Order.findOneAndDelete({ _id: req.params.id, restaurant: restaurantId });
+  if (!deleted) {
+    return res.status(404).json({ message: "Buyurtma topilmadi" });
+  }
   res.json({ ok: true });
 };

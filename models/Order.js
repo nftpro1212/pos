@@ -42,7 +42,7 @@ const orderSchema = new mongoose.Schema({
   fiscalPayload: { type: mongoose.Schema.Types.Mixed, default: null },
   fiscalSyncedAt: { type: Date, default: null },
   createdBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
-  restaurantId: { type: String, default: "default" },
+  restaurant: { type: mongoose.Schema.Types.ObjectId, ref: "Restaurant", index: true },
   deliveryCourier: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
   customer: { type: mongoose.Schema.Types.ObjectId, ref: "Customer" },
   isDelivery: { type: Boolean, default: false },

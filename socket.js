@@ -5,6 +5,15 @@ const agentChannels = new Map(); // channel -> { socket, lastSeen, meta }
 const pendingJobs = new Map(); // jobId -> { resolve, reject, timeout, channel }
 let ioInstance = null;
 
+const toRoomKey = (value) => {
+  if (!value) return "default";
+  try {
+    return value.toString();
+  } catch (_err) {
+    return "default";
+  }
+};
+
 const settlePendingJob = (jobId, payload, isError = false) => {
   const entry = pendingJobs.get(jobId);
   if (!entry) return;
@@ -33,14 +42,15 @@ const unregisterAgentBySocket = (socketId) => {
   }
 };
 
-export const hasActivePrintAgent = (channel = "default") => agentChannels.has(channel);
+export const hasActivePrintAgent = (channel = "default") => agentChannels.has(toRoomKey(channel));
 
 export const dispatchPrintJob = async ({ restaurantId = "default", job, timeoutMs = 10000 }) => {
   if (!job) {
     throw new Error("Job payload majburiy");
   }
 
-  const agentEntry = agentChannels.get(restaurantId);
+  const channelKey = toRoomKey(restaurantId);
+  const agentEntry = agentChannels.get(channelKey);
   if (!agentEntry) {
     return {
       success: false,
@@ -65,7 +75,7 @@ export const dispatchPrintJob = async ({ restaurantId = "default", job, timeoutM
     }, timeoutMs);
 
     pendingJobs.set(jobId, {
-      channel: restaurantId,
+      channel: channelKey,
       timeout,
       resolve: (result = {}) => {
         resolve({
@@ -95,28 +105,30 @@ export const initSocket = (io) => {
     console.log("Socket connected:", socket.id);
 
     socket.on("join-restaurant", (restaurantId) => {
-      socket.join(restaurantId || "default");
+      socket.join(toRoomKey(restaurantId));
     });
 
     socket.on("print-agent:register", ({ channel = "default", meta = {} } = {}) => {
-      const previous = agentChannels.get(channel);
+      const channelKey = toRoomKey(channel);
+      const previous = agentChannels.get(channelKey);
       if (previous && previous.socket.id !== socket.id) {
-        previous.socket.leave(channel);
-        previous.socket.emit("print-agent:status", { status: "replaced", channel });
+        previous.socket.leave(channelKey);
+        previous.socket.emit("print-agent:status", { status: "replaced", channel: channelKey });
       }
 
-      agentChannels.set(channel, {
+      agentChannels.set(channelKey, {
         socket,
         lastSeen: Date.now(),
         meta,
       });
-      socket.join(channel);
-      console.log(`Print agent registered on channel: ${channel}`);
-      socket.emit("print-agent:status", { status: "registered", channel });
+      socket.join(channelKey);
+      console.log(`Print agent registered on channel: ${channelKey}`);
+      socket.emit("print-agent:status", { status: "registered", channel: channelKey });
     });
 
     socket.on("print-agent:heartbeat", ({ channel = "default" } = {}) => {
-      const agent = agentChannels.get(channel);
+      const channelKey = toRoomKey(channel);
+      const agent = agentChannels.get(channelKey);
       if (agent && agent.socket.id === socket.id) {
         agent.lastSeen = Date.now();
       }
@@ -137,11 +149,11 @@ export const initSocket = (io) => {
     });
 
     socket.on("order:created", (order) => {
-      io.to(order.restaurantId || "default").emit("order:new", order);
+      io.to(toRoomKey(order?.restaurant || order?.restaurantId)).emit("order:new", order);
     });
 
     socket.on("order:updated", (order) => {
-      io.to(order.restaurantId || "default").emit("order:updated", order);
+      io.to(toRoomKey(order?.restaurant || order?.restaurantId)).emit("order:updated", order);
     });
 
     socket.on("disconnect", () => {

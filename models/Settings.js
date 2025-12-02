@@ -133,6 +133,7 @@ const printerSettingsSchema = new Schema(
 
 const settingsSchema = new mongoose.Schema({
   // Umumiy sozlamalar
+  restaurant: { type: Schema.Types.ObjectId, ref: "Restaurant", index: true },
   restaurantName: { type: String, default: "ZarPOS Restoran" },
   restaurantAddress: { type: String, default: "" },
   restaurantPhone: { type: String, default: "" },

@@ -10,7 +10,19 @@ export const protect = async (req, res, next) => {
     if (!header) return res.status(401).json({ message: "Not authorized" });
     const token = header.split(" ")[1];
     const payload = jwt.verify(token, process.env.JWT_SECRET);
-    req.user = await User.findById(payload.id).select("-passwordHash");
+    const user = await User.findById(payload.id).select("-passwordHash");
+    if (!user) {
+      return res.status(401).json({ message: "Not authorized" });
+    }
+
+    if (user.status === "disabled") {
+      return res.status(403).json({ message: "Account disabled" });
+    }
+
+    req.user = user;
+    req.isSystemAdmin = Boolean(user.isSystemAdmin);
+    req.restaurantId = payload.restaurantId
+      || (user.restaurant ? user.restaurant.toString() : null);
     next();
   } catch (err) {
     console.error(err);
@@ -19,7 +31,7 @@ export const protect = async (req, res, next) => {
 };
 
 export const adminOnly = (req, res, next) => {
-  if (req.user && req.user.role === "admin") return next();
+  if (req.user && (req.user.role === "admin" || req.isSystemAdmin)) return next();
   return res.status(403).json({ message: "Admin only" });
 };
 
@@ -28,7 +40,7 @@ export const allowRoles = (...roles) => (req, res, next) => {
     return res.status(401).json({ message: "Not authorized" });
   }
 
-  if (!roles.length || roles.includes(req.user.role)) {
+  if (req.isSystemAdmin || !roles.length || roles.includes(req.user.role)) {
     return next();
   }
 

@@ -51,6 +51,7 @@ const recipeVersionSchema = new Schema(
 const recipeSchema = new Schema(
   {
     name: { type: String, required: true, trim: true },
+    restaurant: { type: Schema.Types.ObjectId, ref: "Restaurant", index: true },
     menuItem: { type: Schema.Types.ObjectId, ref: "MenuItem", index: true },
     code: { type: String, trim: true, uppercase: true, unique: true, sparse: true },
     category: { type: String, trim: true, default: "" },
@@ -66,7 +67,7 @@ const recipeSchema = new Schema(
   { timestamps: true }
 );
 
-recipeSchema.index({ name: 1 }, { unique: true });
+recipeSchema.index({ restaurant: 1, name: 1 }, { unique: true });
 recipeSchema.index({ isActive: 1, name: 1 });
 recipeSchema.index({ menuItem: 1, isActive: 1 });
 

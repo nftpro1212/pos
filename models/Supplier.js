@@ -82,7 +82,8 @@ const invoiceSchema = new Schema(
 const supplierSchema = new Schema(
   {
     name: { type: String, required: true, trim: true },
-    code: { type: String, trim: true, uppercase: true, unique: true, sparse: true },
+    restaurant: { type: Schema.Types.ObjectId, ref: "Restaurant", index: true },
+    code: { type: String, trim: true, uppercase: true, sparse: true },
     companyName: { type: String, trim: true, default: "" },
     taxId: { type: String, trim: true, default: "" },
     categories: [{ type: String, trim: true }],
@@ -105,7 +106,8 @@ const supplierSchema = new Schema(
   { timestamps: true }
 );
 
-supplierSchema.index({ name: 1 }, { unique: true });
+supplierSchema.index({ restaurant: 1, name: 1 }, { unique: true });
+supplierSchema.index({ restaurant: 1, code: 1 }, { unique: true, sparse: true });
 supplierSchema.index({ isActive: 1, name: 1 });
 supplierSchema.index({ "priceHistory.item": 1, isActive: 1 });
 supplierSchema.index({ "invoices.dueDate": 1 });

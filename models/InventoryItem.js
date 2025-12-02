@@ -6,6 +6,7 @@ const { Schema } = mongoose;
 const inventoryItemSchema = new Schema(
   {
     name: { type: String, required: true, trim: true },
+    restaurant: { type: Schema.Types.ObjectId, ref: "Restaurant", index: true },
     sku: { type: String, trim: true, uppercase: true, unique: true, sparse: true },
     category: { type: String, trim: true, default: "" },
     unit: { type: String, trim: true, default: "dona" },
@@ -36,6 +37,7 @@ const inventoryItemSchema = new Schema(
 );
 
 inventoryItemSchema.index({ name: 1 });
+inventoryItemSchema.index({ restaurant: 1, name: 1 });
 inventoryItemSchema.index({ category: 1 });
 inventoryItemSchema.index({ isActive: 1, currentStock: 1 });
 inventoryItemSchema.index({ defaultWarehouse: 1 });

@@ -11,6 +11,20 @@ import {
 } from "../utils/printer.js";
 import { dispatchPrintJob, hasActivePrintAgent } from "../socket.js";
 import { resolveTaxRate } from "../utils/tax.js";
+import { ensureRestaurantId, resolveRestaurantId } from "../utils/tenant.js";
+
+const buildSettingsFilter = (settings, restaurantId) => {
+  if (settings?._id) {
+    return { _id: settings._id };
+  }
+  if (settings?.restaurant) {
+    return { restaurant: settings.restaurant };
+  }
+  if (restaurantId) {
+    return { restaurant: restaurantId };
+  }
+  return null;
+};
 
 const resolveDispatchMode = (value, fallback = "direct") => {
   const allowed = new Set(["direct", "agent"]);
@@ -76,6 +90,11 @@ const triggerAutomaticPrints = async (
   const printers = Array.isArray(basePrinterSettings.printers)
     ? basePrinterSettings.printers
     : [];
+
+  const settingsFilter = buildSettingsFilter(
+    settings,
+    order?.restaurant || payment?.restaurant || order?.restaurantId || payment?.restaurantId,
+  );
 
   const normalizedTargetIds = Array.isArray(targetPrinterIds)
     ? targetPrinterIds.filter(Boolean).map(String)
@@ -223,9 +242,9 @@ const triggerAutomaticPrints = async (
           );
         }
 
-        if (printer?._id) {
+        if (printer?._id && settingsFilter) {
           await Settings.updateOne(
-            { "printerSettings.printers._id": printer._id },
+            { ...settingsFilter, "printerSettings.printers._id": printer._id },
             {
               $set: {
                 "printerSettings.printers.$.lastPrintDate": new Date(),
@@ -234,9 +253,9 @@ const triggerAutomaticPrints = async (
               },
             },
           );
-        } else {
+        } else if (settingsFilter) {
           await Settings.updateOne(
-            {},
+            settingsFilter,
             {
               $set: {
                 "printerSettings.lastPrintDate": new Date(),
@@ -257,9 +276,9 @@ const triggerAutomaticPrints = async (
       } catch (error) {
         console.error("[AUTOPRINT] Error:", error);
 
-        if (printer?._id) {
+        if (printer?._id && settingsFilter) {
           await Settings.updateOne(
-            { "printerSettings.printers._id": printer._id },
+            { ...settingsFilter, "printerSettings.printers._id": printer._id },
             {
               $set: {
                 "printerSettings.printers.$.connectionStatus": "disconnected",
@@ -267,9 +286,9 @@ const triggerAutomaticPrints = async (
               },
             },
           );
-        } else {
+        } else if (settingsFilter) {
           await Settings.updateOne(
-            {},
+            settingsFilter,
             {
               $set: {
                 "printerSettings.connectionStatus": "disconnected",
@@ -300,56 +319,94 @@ const triggerAutomaticPrints = async (
   };
 };
 
+const normalizePaymentParts = (parts = [], fallbackAmount = 0, fallbackMethod = "cash", fallbackTxnId = "") => {
+  if (!Array.isArray(parts) || !parts.length) {
+    return [
+      {
+        amount: Number(fallbackAmount) || 0,
+        method: fallbackMethod || "cash",
+        txnId: fallbackTxnId || "",
+      },
+    ];
+  }
+
+  return parts
+    .map((part) => ({
+      amount: Number(part?.amount) || 0,
+      method: (part?.method || fallbackMethod || "cash").trim().toLowerCase(),
+      txnId: part?.txnId || fallbackTxnId || "",
+    }))
+    .filter((part) => part.amount > 0);
+};
+
 export const createPayment = async (req, res) => {
+  let restaurantId;
   try {
-    const { orderId, amount, method, parts } = req.body;
+    restaurantId = ensureRestaurantId(req, { allowBody: true, allowQuery: true });
+  } catch (error) {
+    return res.status(error.statusCode || 400).json({ message: error.message });
+  }
+
+  try {
+    const { orderId, amount, method, parts, txnId, customer } = req.body || {};
+    if (!orderId) {
+      return res.status(400).json({ message: "Buyurtma aniqlanmadi" });
+    }
+
+    const order = await Order.findOne({ _id: orderId, restaurant: restaurantId });
+    if (!order) {
+      return res.status(404).json({ message: "Buyurtma topilmadi" });
+    }
+
+    const normalizedParts = normalizePaymentParts(parts, amount, method, txnId);
+    const totalAmount = normalizedParts.reduce((sum, part) => sum + part.amount, 0);
+
     const paymentDoc = {
-      order: orderId,
-      txnId: req.body.txnId || "",
+      order: order._id,
+      restaurant: restaurantId,
+      parts: normalizedParts,
+      totalAmount,
+      method: method || normalizedParts[0]?.method || "cash",
+      txnId: txnId || "",
       createdAt: new Date(),
     };
 
-    if (Array.isArray(parts) && parts.length > 0) {
-      paymentDoc.parts = parts;
-      paymentDoc.totalAmount = parts.reduce((sum, part) => sum + (Number(part.amount) || 0), 0);
-    } else {
-      paymentDoc.parts = [
-        {
-          amount: Number(amount) || 0,
-          method: method || "cash",
-          txnId: req.body.txnId || "",
-        },
-      ];
-      paymentDoc.totalAmount = Number(amount) || 0;
-      paymentDoc.method = method;
-      paymentDoc.amount = Number(amount) || 0;
+    if (customer) {
+      paymentDoc.customer = customer;
     }
-
-    if (req.body.customer) paymentDoc.customer = req.body.customer;
 
     const payment = await Payment.create(paymentDoc);
 
-    const order = await Order.findById(orderId);
-    if (order) {
-      order.status = "closed";
-      await order.save();
+    order.status = "closed";
+    await order.save();
 
-      if (order.table) {
-        await Table.findByIdAndUpdate(order.table, {
+    if (order.table) {
+      await Table.findOneAndUpdate(
+        { _id: order.table, restaurant: restaurantId },
+        {
           status: "free",
           assignedTo: null,
           assignedToName: "",
           assignedAt: null,
-        });
-        await Order.deleteMany({ table: order.table, status: { $ne: "closed" } });
-      }
+        },
+      );
 
-      const io = req.app.get("io");
-      if (io) io.to(order.restaurantId || "default").emit("order:updated", order);
+      await Order.deleteMany({
+        table: order.table,
+        restaurant: restaurantId,
+        status: { $nin: ["closed", "cancelled"] },
+        _id: { $ne: order._id },
+      });
+    }
+
+    const io = req.app.get("io");
+    if (io) {
+      const room = restaurantId ? restaurantId.toString() : "default";
+      io.to(room).emit("order:updated", order);
     }
 
     await payment.populate([
-      { path: "order", select: "table tableName restaurantId total items" },
+      { path: "order", select: "table tableName restaurant total items" },
       { path: "customer", select: "name phone" },
     ]);
 
@@ -359,7 +416,7 @@ export const createPayment = async (req, res) => {
     };
 
     try {
-      const settings = await Settings.findOne();
+      const settings = await Settings.findOne({ restaurant: restaurantId });
       if (settings) {
         printReport = await triggerAutomaticPrints({ settings, order, payment });
       }
@@ -367,12 +424,7 @@ export const createPayment = async (req, res) => {
       console.error("[AUTOPRINT] trigger error", printError);
     }
 
-    const payload = {
-      ...payment.toObject(),
-      printReport,
-    };
-
-    res.json(payload);
+    res.json({ ...payment.toObject(), printReport });
   } catch (error) {
     console.error("[PAYMENT] create error", error);
     res.status(500).json({ message: error.message || "To'lovni bajarib bo'lmadi" });
@@ -389,8 +441,15 @@ export const printPaymentReceipt = async (req, res) => {
       agentChannel: overrideAgentChannel,
     } = req.body || {};
 
-    const payment = await Payment.findById(paymentId)
-      .populate({ path: "order", select: "table tableName restaurantId total items" })
+    let restaurantId;
+    try {
+      restaurantId = ensureRestaurantId(req, { allowBody: true, allowQuery: true });
+    } catch (error) {
+      return res.status(error.statusCode || 400).json({ message: error.message });
+    }
+
+    const payment = await Payment.findOne({ _id: paymentId, restaurant: restaurantId })
+      .populate({ path: "order", select: "table tableName restaurant total items" })
       .populate({ path: "customer", select: "name phone" });
 
     if (!payment) {
@@ -409,7 +468,7 @@ export const printPaymentReceipt = async (req, res) => {
       return res.status(404).json({ message: "Buyurtma topilmadi" });
     }
 
-    const settings = await Settings.findOne();
+    const settings = await Settings.findOne({ restaurant: restaurantId });
     if (!settings?.printerSettings?.enabled) {
       return res.status(400).json({ message: "Printer sozlamalari faol emas" });
     }
@@ -447,10 +506,15 @@ export const printPaymentReceipt = async (req, res) => {
 
 export const listPayments = async (req, res) => {
   try {
-    const payments = await Payment.find()
+    const restaurantId = resolveRestaurantId(req, { allowQuery: true });
+    if (!restaurantId) {
+      return res.status(400).json({ message: "Restoran aniqlanmadi" });
+    }
+
+    const payments = await Payment.find({ restaurant: restaurantId })
       .sort({ createdAt: -1 })
       .limit(200)
-      .populate({ path: "order", select: "table tableName restaurantId total" })
+      .populate({ path: "order", select: "table tableName restaurant total" })
       .populate({ path: "customer", select: "name phone" });
 
     res.json(payments);

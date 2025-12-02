@@ -9,6 +9,7 @@ const paymentPartSchema = new mongoose.Schema({
 
 const paymentSchema = new mongoose.Schema({
   order: { type: mongoose.Schema.Types.ObjectId, ref: "Order" },
+  restaurant: { type: mongoose.Schema.Types.ObjectId, ref: "Restaurant", index: true },
   parts: [paymentPartSchema], // split/mixed payments
   totalAmount: Number,
   discount: { type: Number, default: 0 },

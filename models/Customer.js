@@ -3,6 +3,7 @@ import mongoose from "mongoose";
 
 const customerSchema = new mongoose.Schema({
   name: { type: String, required: true },
+  restaurant: { type: mongoose.Schema.Types.ObjectId, ref: "Restaurant", index: true },
   phone: String,
   isVIP: { type: Boolean, default: false },
   isLoan: { type: Boolean, default: false },

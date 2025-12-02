@@ -1,5 +1,6 @@
 // src/backend/controllers/tableController.js
 import Table from "../models/Table.js";
+import { resolveRestaurantId } from "../utils/tenant.js";
 
 const normalizeCategory = (category = "") => {
   if (typeof category !== "string") return "zal";
@@ -9,7 +10,12 @@ const normalizeCategory = (category = "") => {
 
 export const listTables = async (req, res) => {
   try {
-    const tables = await Table.find()
+    const restaurantId = resolveRestaurantId(req, { allowQuery: true });
+    if (!restaurantId) {
+      return res.status(400).json({ message: "Restoran aniqlanmadi" });
+    }
+
+    const tables = await Table.find({ restaurant: restaurantId })
       .sort({ name: 1 })
       .populate("assignedTo", "name role");
     res.json(tables);
@@ -20,6 +26,11 @@ export const listTables = async (req, res) => {
 
 export const createTable = async (req, res) => {
   try {
+    const restaurantId = resolveRestaurantId(req, { allowBody: true, allowQuery: true });
+    if (!restaurantId) {
+      return res.status(400).json({ message: "Restoran aniqlanmadi" });
+    }
+
     const { name, category } = req.body;
     if (!name || !name.trim()) {
       return res.status(400).json({ message: "Stol nomi talab qilinadi" });
@@ -28,6 +39,7 @@ export const createTable = async (req, res) => {
     const payload = {
       name: name.trim(),
       category: normalizeCategory(category),
+      restaurant: restaurantId,
     };
 
     const table = await Table.create(payload);
@@ -39,6 +51,11 @@ export const createTable = async (req, res) => {
 
 export const updateTable = async (req, res) => {
   try {
+    const restaurantId = resolveRestaurantId(req, { allowBody: true, allowQuery: true });
+    if (!restaurantId) {
+      return res.status(400).json({ message: "Restoran aniqlanmadi" });
+    }
+
     const updates = { ...req.body };
 
     if (updates.name) {
@@ -55,7 +72,14 @@ export const updateTable = async (req, res) => {
       updates.assignedAt = null;
     }
 
-    const table = await Table.findByIdAndUpdate(req.params.id, updates, { new: true })
+    delete updates.restaurant;
+    delete updates.tenantId;
+
+    const table = await Table.findOneAndUpdate(
+      { _id: req.params.id, restaurant: restaurantId },
+      updates,
+      { new: true }
+    )
       .populate("assignedTo", "name role");
 
     if (!table) {
@@ -70,7 +94,15 @@ export const updateTable = async (req, res) => {
 
 export const deleteTable = async (req, res) => {
   try {
-    await Table.findByIdAndDelete(req.params.id);
+    const restaurantId = resolveRestaurantId(req, { allowQuery: true, allowBody: true });
+    if (!restaurantId) {
+      return res.status(400).json({ message: "Restoran aniqlanmadi" });
+    }
+
+    const deleted = await Table.findOneAndDelete({ _id: req.params.id, restaurant: restaurantId });
+    if (!deleted) {
+      return res.status(404).json({ message: "Stol topilmadi" });
+    }
     res.json({ ok: true });
   } catch (error) {
     res.status(500).json({ message: error.message || "Stolni o'chirib bo'lmadi" });

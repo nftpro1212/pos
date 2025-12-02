@@ -1,5 +1,6 @@
 // src/backend/controllers/menuController.js
 import MenuItem from "../models/MenuItem.js";
+import { resolveRestaurantId } from "../utils/tenant.js";
 
 const VALID_PRICING_MODES = new Set(["fixed", "weight", "portion"]);
 const VALID_WEIGHT_UNITS = new Set(["kg", "g"]);
@@ -63,12 +64,26 @@ const normalizePortionOptions = (options) => {
 };
 
 export const listMenu = async (req, res) => {
+  const restaurantId = resolveRestaurantId(req, { allowQuery: true });
+  if (!restaurantId) {
+    return res.status(400).json({ message: "Restoran aniqlanmadi" });
+  }
+
   const q = req.query.q || "";
-  const items = await MenuItem.find({ name: { $regex: q, $options: "i" } }).sort({ createdAt: -1 });
+  const filter = {
+    restaurant: restaurantId,
+    ...(q ? { name: { $regex: q, $options: "i" } } : {}),
+  };
+  const items = await MenuItem.find(filter).sort({ createdAt: -1 });
   res.json(items);
 };
 
 export const createMenu = async (req, res) => {
+  const restaurantId = resolveRestaurantId(req, { allowBody: true, allowQuery: true });
+  if (!restaurantId) {
+    return res.status(400).json({ message: "Restoran aniqlanmadi" });
+  }
+
   const {
     name,
     description,
@@ -106,11 +121,17 @@ export const createMenu = async (req, res) => {
     weightUnit: safeWeightUnit,
     weightStep: safeWeightStep,
     portionOptions: safePortions,
+    restaurant: restaurantId,
   });
   res.json(item);
 };
 
 export const updateMenu = async (req, res) => {
+  const restaurantId = resolveRestaurantId(req, { allowBody: true });
+  if (!restaurantId) {
+    return res.status(400).json({ message: "Restoran aniqlanmadi" });
+  }
+
   const id = req.params.id;
   const payload = { ...req.body };
   if (payload.productionPrinterIds && !Array.isArray(payload.productionPrinterIds)) {
@@ -150,12 +171,31 @@ export const updateMenu = async (req, res) => {
   } else if (payload.pricingMode && payload.pricingMode !== "portion") {
     payload.portionOptions = [];
   }
-  const item = await MenuItem.findByIdAndUpdate(id, payload, { new: true });
+  delete payload.restaurant;
+  delete payload.tenantId;
+
+  const item = await MenuItem.findOneAndUpdate(
+    { _id: id, restaurant: restaurantId },
+    payload,
+    { new: true }
+  );
+
+  if (!item) {
+    return res.status(404).json({ message: "Menu topilmadi" });
+  }
   res.json(item);
 };
 
 export const deleteMenu = async (req, res) => {
+  const restaurantId = resolveRestaurantId(req, { allowQuery: true, allowBody: true });
+  if (!restaurantId) {
+    return res.status(400).json({ message: "Restoran aniqlanmadi" });
+  }
+
   const id = req.params.id;
-  await MenuItem.findByIdAndDelete(id);
+  const result = await MenuItem.findOneAndDelete({ _id: id, restaurant: restaurantId });
+  if (!result) {
+    return res.status(404).json({ message: "Menu topilmadi" });
+  }
   res.json({ ok: true });
 };

@@ -15,6 +15,21 @@ const userSchema = new mongoose.Schema(
       default: "kassir",
     },
 
+    restaurant: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Restaurant",
+      index: true,
+      default: null,
+    },
+
+    isSystemAdmin: { type: Boolean, default: false },
+
+    status: {
+      type: String,
+      enum: ["active", "pending", "disabled"],
+      default: "active",
+    },
+
     pinHash: {
       type: String,
       required: false,

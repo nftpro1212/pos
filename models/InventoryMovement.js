@@ -6,6 +6,7 @@ const { Schema } = mongoose;
 const inventoryMovementSchema = new Schema(
   {
     item: { type: Schema.Types.ObjectId, ref: "InventoryItem", required: true },
+    restaurant: { type: Schema.Types.ObjectId, ref: "Restaurant", index: true },
     type: {
       type: String,
       enum: [
@@ -39,6 +40,7 @@ const inventoryMovementSchema = new Schema(
 );
 
 inventoryMovementSchema.index({ item: 1, createdAt: -1 });
+inventoryMovementSchema.index({ restaurant: 1, createdAt: -1 });
 inventoryMovementSchema.index({ warehouse: 1, createdAt: -1 });
 inventoryMovementSchema.index({ supplier: 1, createdAt: -1 });
 
